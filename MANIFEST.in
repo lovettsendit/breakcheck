@@ -3,10 +3,17 @@ include CONTRIBUTING.md
 include LICENSE
 include README.md
 include SECURITY.md
+include SKILL.md
+include AGENTS.md
 recursive-include release_evidence *.json
 recursive-include src/breakcheck *.py
 recursive-include tests *.py
+graft docs
+graft examples
+graft scripts
 global-exclude *.py[cod]
 global-exclude .DS_Store
 global-exclude ._*
 prune .breakcheck
+prune build
+prune dist

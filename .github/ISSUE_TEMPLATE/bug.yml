@@ -1,0 +1,92 @@
+name: Bug report
+description: Report a reproducible Breakcheck defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before posting, remove private paths, private source, literals, outputs, credentials, and `.breakcheck/` artifacts from every field and attachment.
+  - type: input
+    id: version_breakcheck
+    attributes:
+      label: Breakcheck version
+      description: Which Breakcheck version produced this result?
+      placeholder: 2.0.0
+    validations:
+      required: true
+  - type: input
+    id: python_version
+    attributes:
+      label: Python version
+      description: Include the exact supported Python version.
+      placeholder: 3.12.4
+    validations:
+      required: true
+  - type: dropdown
+    id: operating_system
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Breakcheck mode
+      description: Which workflow produced the defect?
+      options:
+        - Dependency comparison
+        - Revision diff
+        - Baseline freeze
+        - Claim attestation
+        - Demo or capabilities
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized_context
+    attributes:
+      label: Sanitized comparison context
+      description: If relevant, name safe package versions, revision refs, target symbols, or claim type. Do not paste private source or repository details.
+  - type: textarea
+    id: sanitized_command
+    attributes:
+      label: Sanitized command
+      description: Paste the command after removing private paths, credentials, literals, and outputs.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: Reproduction steps
+      description: List the smallest safe steps that reproduce the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: observed_behavior
+    attributes:
+      label: Observed behavior
+      description: What did Breakcheck report or do?
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: What should Breakcheck have reported or done?
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: Privacy and security confirmation
+      options:
+        - label: I removed private paths, private source, literals, outputs, credentials, and `.breakcheck/` artifacts before posting.
+          required: true
+    validations:
+      required: true

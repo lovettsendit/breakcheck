@@ -1,0 +1,94 @@
+name: Compatibility case
+description: Report a dependency upgrade compatibility case
+title: "[Compatibility]: "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before posting, remove private paths, private source, literals, outputs, credentials, and `.breakcheck/` artifacts from every field and attachment.
+  - type: input
+    id: version_breakcheck
+    attributes:
+      label: Breakcheck version
+      description: Which Breakcheck version produced this result?
+      placeholder: 2.0.0
+    validations:
+      required: true
+  - type: input
+    id: python_version
+    attributes:
+      label: Python version
+      description: Include the exact supported Python version.
+      placeholder: 3.12.4
+    validations:
+      required: true
+  - type: dropdown
+    id: operating_system
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+    validations:
+      required: true
+  - type: input
+    id: package_name
+    attributes:
+      label: Package name
+      description: Name of the dependency being compared.
+    validations:
+      required: true
+  - type: input
+    id: current_version
+    attributes:
+      label: Current package version
+      description: Version currently installed in the comparison environment.
+    validations:
+      required: true
+  - type: input
+    id: proposed_version
+    attributes:
+      label: Proposed package version
+      description: Version being evaluated for the upgrade.
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized_command
+    attributes:
+      label: Sanitized command
+      description: Paste the command after removing private paths, credentials, literals, and outputs.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: Reproduction steps
+      description: List the smallest safe steps that reproduce the compatibility case.
+    validations:
+      required: true
+  - type: textarea
+    id: observed_behavior
+    attributes:
+      label: Observed behavior
+      description: What changed between the current and proposed versions?
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: What compatibility behavior did you expect?
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: Privacy and security confirmation
+      options:
+        - label: I removed private paths, private source, literals, outputs, credentials, and `.breakcheck/` artifacts before posting.
+          required: true
+    validations:
+      required: true

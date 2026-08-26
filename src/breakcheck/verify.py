@@ -18,7 +18,7 @@ def _without_identity(value, field):
     return observed, copied
 
 
-def verify_report(report, witness):
+def _verify_schema_one(report, witness):
     report = _plain(report)
     if not isinstance(report, dict):
         raise ValueError("report malformed")
@@ -73,3 +73,38 @@ def verify_report(report, witness):
     if witnessed_ids != exercised_ids:
         raise ValueError("witness coverage mismatch")
     return 'VERIFIED'
+
+
+def _verify_schema_two(report, evidence):
+    from breakcheck.schema import artifact_digest, verify_artifact
+
+    verify_artifact(report)
+    verify_artifact(evidence)
+    if report.get("artifact_kind") == "evidence":
+        raise ValueError("ARTIFACT_KIND_REFUSED")
+    if evidence.get("artifact_kind") != "evidence":
+        raise ValueError("ARTIFACT_KIND_REFUSED")
+    report_payload = report["payload"]
+    evidence_payload = evidence["payload"]
+    if evidence_payload["report_kind"] != report["artifact_kind"]:
+        raise ValueError("ARTIFACT_IDENTITY_REFUSED")
+    if evidence_payload["report_artifact_sha256"] != artifact_digest(report):
+        raise ValueError("ARTIFACT_IDENTITY_REFUSED")
+    if evidence_payload["report_payload_sha256"] != report["payload_sha256"]:
+        raise ValueError("ARTIFACT_IDENTITY_REFUSED")
+    if evidence_payload["invocation"] != report_payload["invocation"]:
+        raise ValueError("ARTIFACT_INVOCATION_REFUSED")
+    if evidence_payload["witnesses"] != report_payload.get("witnesses", []):
+        raise ValueError("ARTIFACT_IDENTITY_REFUSED")
+    return "VERIFIED"
+
+
+def verify_report(report, witness):
+    """Verify a historical schema-1 or closed schema-2 report bundle."""
+    if isinstance(report, dict):
+        version = report.get("schema_version")
+        if version == 2:
+            return _verify_schema_two(report, witness)
+        if version not in (None, 1):
+            raise ValueError("ARTIFACT_SCHEMA_VERSION_REFUSED")
+    return _verify_schema_one(report, witness)

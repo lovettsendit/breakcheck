@@ -1,0 +1,57 @@
+{
+  "aggregate": {
+    "authored": 49,
+    "deterministic": 49,
+    "executable": 49,
+    "exercised_after": 50,
+    "exercised_before": 1,
+    "fixture_yield_percent": 100.0,
+    "human_minutes": 0.0,
+    "offered": 49,
+    "valid": 49
+  },
+  "method": {
+    "fixture_edits_after_verdict": 0,
+    "repositories": 3,
+    "repository_authorship": "independent public projects",
+    "runs_per_binding": 2,
+    "wheel_policy": "local-only"
+  },
+  "repositories": [
+    {
+      "authored": 9,
+      "deterministic": 9,
+      "executable": 9,
+      "exercised_after": 9,
+      "exercised_before": 0,
+      "fixture_sha256": "5f17b6a8971c7574219bfa53f981164e360150b31ee380948ff73813052324ec",
+      "name": "Black",
+      "offered": 9,
+      "valid": 9
+    },
+    {
+      "authored": 37,
+      "deterministic": 37,
+      "executable": 37,
+      "exercised_after": 38,
+      "exercised_before": 1,
+      "fixture_sha256": "385a6f4ee479c07fe8f803d12755a138bb59c210f6490e639a6a83c685d1e1da",
+      "name": "Rich CLI",
+      "offered": 37,
+      "valid": 37
+    },
+    {
+      "authored": 3,
+      "deterministic": 3,
+      "executable": 3,
+      "exercised_after": 3,
+      "exercised_before": 0,
+      "fixture_sha256": "fc5c3a2585b9dba059f56893e9c0d931e63f4814e562e8a8693a4baa1aa64c3e",
+      "name": "Flask",
+      "offered": 3,
+      "valid": 3
+    }
+  ],
+  "schema_version": 1,
+  "verdict": "PASS"
+}

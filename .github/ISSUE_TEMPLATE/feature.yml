@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest a focused improvement to Breakcheck
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before posting, remove private paths, private source, literals, outputs, credentials, and `.breakcheck/` artifacts from every field and attachment.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What user problem or workflow gap should this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful change.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches or workarounds have you considered?
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: Privacy and security confirmation
+      options:
+        - label: I removed private paths, private source, literals, outputs, credentials, and `.breakcheck/` artifacts before posting.
+          required: true
+    validations:
+      required: true

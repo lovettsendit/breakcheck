@@ -1,0 +1,116 @@
+name: Revision or claim verification case
+description: Report a sanitized diff, freeze, or attest result that needs investigation
+title: "[Verification]: "
+labels:
+  - verification
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before posting, remove private paths, private source, literals, outputs, credentials, and `.breakcheck/` artifacts from every field and attachment. Report verdicts exactly: `CLAIM_UNVERIFIABLE` is not success, and `CHANGED` does not mean bad.
+  - type: input
+    id: version_breakcheck
+    attributes:
+      label: Breakcheck version
+      description: Which Breakcheck version produced this result?
+      placeholder: 2.0.0
+    validations:
+      required: true
+  - type: input
+    id: python_version
+    attributes:
+      label: Python version
+      description: Include the exact supported Python version.
+      placeholder: 3.12.4
+    validations:
+      required: true
+  - type: dropdown
+    id: operating_system
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Verification mode
+      options:
+        - Revision diff
+        - Baseline freeze
+        - Claim attestation
+    validations:
+      required: true
+  - type: input
+    id: base_revision
+    attributes:
+      label: Sanitized base revision
+      description: Provide a public commit ID or a safe placeholder that still reproduces the case.
+    validations:
+      required: true
+  - type: input
+    id: head_revision
+    attributes:
+      label: Sanitized head revision or baseline
+      description: Provide a public commit ID, worktree, or baseline identifier without private paths.
+    validations:
+      required: true
+  - type: textarea
+    id: target_symbols
+    attributes:
+      label: Sanitized target symbols
+      description: List only public or safely renamed module and symbol names.
+    validations:
+      required: true
+  - type: dropdown
+    id: fixture_source
+    attributes:
+      label: Fixture source
+      description: State which revision supplied the fixtures used for verification.
+      options:
+        - Base revision
+        - Head revision
+        - Explicit fixture file
+        - No fixtures
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized_command
+    attributes:
+      label: Sanitized command
+      description: Paste the command after removing private paths, credentials, literals, and outputs.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: Reproduction steps
+      description: List the smallest safe steps that reproduce the verification case.
+    validations:
+      required: true
+  - type: textarea
+    id: observed_behavior
+    attributes:
+      label: Observed verdicts
+      description: Include exact sanitized verdict names such as CLAIM_VERIFIED, CLAIM_REFUTED, CLAIM_UNVERIFIABLE, or CLAIM_OUT_OF_SCOPE and the reported coverage.
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: Explain the expected comparison or refusal without asserting that intentional change is a defect.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: Privacy and security confirmation
+      options:
+        - label: I removed private paths, private source, literals, outputs, credentials, and `.breakcheck/` artifacts before posting.
+          required: true
+    validations:
+      required: true
