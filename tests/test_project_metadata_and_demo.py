@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import zipfile
@@ -94,6 +95,34 @@ def _line_value(output: str, name: str) -> Path:
     raise AssertionError(f"missing {prefix!r} in demo output:\n{output}")
 
 
+def _python_without_build_backend(tmp_path: Path, executable: Path | None = None) -> Path:
+    wrapper = tmp_path / "python-without-build-backend"
+    selected = Path(sys.executable) if executable is None else executable
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "if [ \"${1:-}\" = \"-m\" ] && [ \"${2:-}\" = \"pip\" ] "
+        "&& [ \"${3:-}\" = \"wheel\" ]; then\n"
+        "    printf '%s\\n' 'BUILD_BACKEND_MUST_NOT_RUN' >&2\n"
+        "    exit 97\n"
+        "fi\n"
+        "if [ \"${1:-}\" = \"-m\" ] && [ \"${2:-}\" = \"pip\" ] "
+        "&& [ \"${3:-}\" = \"install\" ]; then\n"
+        "    has_target=0\n"
+        "    for argument in \"$@\"; do\n"
+        "        [ \"$argument\" = \"--target\" ] && has_target=1\n"
+        "    done\n"
+        "    if [ \"$has_target\" -ne 1 ]; then\n"
+        "        printf '%s\\n' 'CALLER_ENVIRONMENT_MUST_NOT_BE_MODIFIED' >&2\n"
+        "        exit 98\n"
+        "    fi\n"
+        "fi\n"
+        f"exec {shlex.quote(str(selected))} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
 def test_current_project_metadata_and_public_artifacts_are_declared():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert project["project"]["version"] == "2.0.0"
@@ -116,12 +145,13 @@ def test_current_project_metadata_and_public_artifacts_are_declared():
     assert "docs/assets/breakcheck-social-preview.png" in readme
 
 
-def test_demo_runs_real_changed_case_from_offline_synthetic_wheels(tmp_path: Path):
+def test_demo_uses_installed_breakcheck_without_a_build_backend(tmp_path: Path):
     wheelhouse = _offline_wheelhouse(tmp_path)
+    python = _python_without_build_backend(tmp_path)
     environment = os.environ | {
         "BREAKCHECK_DEMO_WHEELHOUSE": str(wheelhouse),
         "BREAKCHECK_DEMO_KEEP": "1",
-        "PYTHON": sys.executable,
+        "PYTHON": str(python),
     }
     result = subprocess.run(
         ["sh", str(DEMO)],
@@ -133,6 +163,8 @@ def test_demo_runs_real_changed_case_from_offline_synthetic_wheels(tmp_path: Pat
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "BUILD_BACKEND_MUST_NOT_RUN" not in result.stderr
+    assert "CALLER_ENVIRONMENT_MUST_NOT_BE_MODIFIED" not in result.stderr
     assert "BREAKCHECK_EXIT=3" in result.stdout
     assert "VERIFIED" in result.stdout
     assert "DEMO_VERDICT=PASS" in result.stdout
@@ -151,9 +183,47 @@ def test_demo_runs_real_changed_case_from_offline_synthetic_wheels(tmp_path: Pat
         assert report["schema_version"] == 2
         assert report["payload"]["summary"]["changed"] == 1
         assert len(report["payload"]["findings"]) == 1
-        assert report["payload"]["findings"][0]["verdict"] == "CHANGED"
+        finding = report["payload"]["findings"][0]
+        assert finding["verdict"] == "CHANGED"
+        assert finding["old"]["kind"] == "value"
+        assert finding["old"]["payload"] == "1.0.0"
+        assert finding["new"]["kind"] == "exception"
+        assert finding["new"]["exception_class"] == "TypeError"
+        assert "unexpected keyword argument" in finding["new"]["payload"][0]
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_demo_source_checkout_fallback_does_not_require_a_build_backend(tmp_path: Path):
+    wheelhouse = _offline_wheelhouse(tmp_path)
+    environment_root = tmp_path / "clean-python"
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(environment_root)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    executable = "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    clean_python = environment_root / executable
+    python = _python_without_build_backend(tmp_path, clean_python)
+    result = subprocess.run(
+        ["sh", str(DEMO)],
+        cwd=ROOT,
+        env=os.environ
+        | {
+            "BREAKCHECK_DEMO_WHEELHOUSE": str(wheelhouse),
+            "PYTHON": str(python),
+            "PYTHONPATH": "",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "BUILD_BACKEND_MUST_NOT_RUN" not in result.stderr
+    assert "CALLER_ENVIRONMENT_MUST_NOT_BE_MODIFIED" not in result.stderr
+    assert "DEMO_VERDICT=PASS" in result.stdout
 
 
 def test_builtin_demo_refuses_an_unverified_artifact_bundle(tmp_path: Path) -> None:

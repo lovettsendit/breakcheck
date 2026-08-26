@@ -241,6 +241,39 @@ def test_artifact_scanner_checks_commit_email_metadata(tmp_path: Path) -> None:
     assert "personal email in git metadata" in result.stdout
 
 
+def test_artifact_scanner_allows_github_noreply_merge_metadata(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "config", "user.name", "GitHub"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "noreply@github.com"],
+        check=True,
+    )
+    (repository / "tracked.txt").write_text("safe content\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "commit",
+            "-qm",
+            "Merge pull request",
+            "--author",
+            "Contributor <12345+contributor@users.noreply.github.com>",
+        ],
+        check=True,
+    )
+
+    result = subprocess.run(
+        ["bash", str(SCANNER), str(repository)],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_artifact_scanner_refuses_archive_traversal_and_links(tmp_path: Path) -> None:
     traversal = tmp_path / "traversal.whl"
     with zipfile.ZipFile(traversal, "w") as archive:

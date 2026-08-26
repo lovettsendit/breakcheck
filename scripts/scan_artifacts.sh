@@ -41,7 +41,7 @@ email_pattern = re.compile(
     rb"(?<!\\)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 )
 noreply_pattern = re.compile(
-    rb"[A-Za-z0-9._%+-]+@(users\.)?noreply\.github\.com$",
+    rb"(?:[A-Za-z0-9._%+-]+@(users\.)?noreply\.github\.com|noreply@github\.com)$",
     re.IGNORECASE,
 )
 credential_patterns = (

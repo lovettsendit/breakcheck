@@ -7,10 +7,7 @@ CHECKOUT=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
 EXAMPLE_ROOT="$CHECKOUT/examples/packaging-change"
 DEMO_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/breakcheck-demo.XXXXXX")
 DEMO_ROOT=$(CDPATH= cd "$DEMO_ROOT" && pwd -P)
-TOOL_ENV="$DEMO_ROOT/tool-env"
-CURRENT_ENV="$DEMO_ROOT/current-package-env"
-TOOL_WHEELHOUSE="$DEMO_ROOT/tool-wheelhouse"
-SOURCE_COPY="$DEMO_ROOT/breakcheck-source"
+TOOL_SITE="$DEMO_ROOT/tool-site"
 RUNTIME_ROOT="$DEMO_ROOT/runtime"
 RESULTS_ROOT="$DEMO_ROOT/results"
 REPORT_PATH="$RESULTS_ROOT/report.json"
@@ -85,24 +82,32 @@ if [ -z "${BREAKCHECK_DEMO_WHEELHOUSE:-}" ]; then
     }
 fi
 
-"$PYTHON" -m venv "$TOOL_ENV"
-"$PYTHON" -m venv "$CURRENT_ENV"
-TOOL_PYTHON="$TOOL_ENV/bin/python"
-CURRENT_PYTHON="$CURRENT_ENV/bin/python"
-mkdir -p "$SOURCE_COPY"
-cp "$CHECKOUT/pyproject.toml" "$CHECKOUT/LICENSE" "$CHECKOUT/MANIFEST.in" "$CHECKOUT/README.md" "$SOURCE_COPY/"
-cp -R "$CHECKOUT/src" "$SOURCE_COPY/src"
-mkdir -p "$TOOL_WHEELHOUSE"
-"$PYTHON" -m pip wheel --no-build-isolation --no-deps --wheel-dir "$TOOL_WHEELHOUSE" "$SOURCE_COPY"
-"$TOOL_PYTHON" -m pip install --no-index --find-links "$TOOL_WHEELHOUSE" 'breakcheck==2.0.0'
-"$TOOL_PYTHON" -m pip install --no-index --find-links "$WHEELHOUSE" 'packaging==21.3'
-"$CURRENT_PYTHON" -m pip install --no-index --find-links "$WHEELHOUSE" 'packaging==21.3'
+TOOL_PYTHON="$PYTHON"
+if "$PYTHON" -c 'import breakcheck; raise SystemExit(0 if breakcheck.__version__ == "2.0.0" else 1)' 2>/dev/null; then
+    BREAKCHECK_IMPORT_ROOT=$("$PYTHON" -c 'from pathlib import Path; import breakcheck; print(Path(breakcheck.__file__).resolve().parent.parent)')
+else
+    BREAKCHECK_IMPORT_ROOT="$CHECKOUT/src"
+fi
+mkdir -p "$TOOL_SITE"
+"$PYTHON" -m pip install --no-index --no-deps --target "$TOOL_SITE" "$WHEEL_21"
 mkdir -p "$RESULTS_ROOT"
+
+run_breakcheck() {
+    PYTHONPATH= "$TOOL_PYTHON" - "$TOOL_SITE" "$BREAKCHECK_IMPORT_ROOT" "$@" <<'PY'
+import runpy
+import sys
+
+tool_site, import_root, *arguments = sys.argv[1:]
+sys.path[:0] = [tool_site, import_root]
+sys.argv = ["breakcheck", *arguments]
+runpy.run_module("breakcheck", run_name="__main__")
+PY
+}
 
 set +e
 (
     cd "$EXAMPLE_ROOT"
-    "$TOOL_PYTHON" -m breakcheck packaging@22.0 \
+    run_breakcheck packaging@22.0 \
         --wheelhouse "$WHEELHOUSE" \
         --runtime-root "$RUNTIME_ROOT" \
         --output "$REPORT_PATH" \
@@ -136,7 +141,7 @@ if not isinstance(summary, dict) or summary.get("changed") != 1:
     raise SystemExit("BREAKCHECK_DEMO_REFUSED: expected summary.changed == 1")
 PY
 
-"$TOOL_PYTHON" -m breakcheck --verify "$REPORT_PATH" --evidence "$EVIDENCE_PATH"
+run_breakcheck --verify "$REPORT_PATH" --evidence "$EVIDENCE_PATH"
 printf '%s\n' "REPORT_PATH=$REPORT_PATH"
 printf '%s\n' "EVIDENCE_PATH=$EVIDENCE_PATH"
 printf '%s\n' "DEMO_VERDICT=PASS"
