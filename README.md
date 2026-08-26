@@ -3,8 +3,8 @@
 Dependabot tells you a new version exists. Breakcheck tells you whether the calls your code actually makes behave differently.
 
 [![CI](https://github.com/lovettsendit/breakcheck/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lovettsendit/breakcheck/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/breakcheck)](https://pypi.org/project/breakcheck/)
-[![Python](https://img.shields.io/pypi/pyversions/breakcheck)](https://pypi.org/project/breakcheck/)
+[![PyPI](https://img.shields.io/pypi/v/breakcheck.svg?logo=pypi&label=PyPI&cacheSeconds=300)](https://pypi.org/project/breakcheck/)
+[![Python](https://img.shields.io/pypi/pyversions/breakcheck.svg?logo=python&label=Python&cacheSeconds=300)](https://pypi.org/project/breakcheck/)
 [![License](https://img.shields.io/github/license/lovettsendit/breakcheck)](LICENSE)
 
 Breakcheck is a deterministic behavioral comparison tool for Python. It answers two bounded questions:
