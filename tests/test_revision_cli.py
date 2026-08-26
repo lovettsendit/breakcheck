@@ -6,11 +6,13 @@ from pathlib import Path
 
 import pytest
 
+from breakcheck import revision_cli
 from breakcheck.revision_cli import (
     RevisionModeRefusal,
     attest_revision,
     diff_revisions,
 )
+from breakcheck.adapters.python.fixtures import FixtureRefusal
 from breakcheck.revision_report import make_revision_artifact
 from breakcheck.revision_cli import freeze_revision
 from breakcheck.report import ci_exit_code
@@ -664,3 +666,12 @@ def test_strict_separation_refuses_explicit_checkout_fixtures(
             strict_separation=True,
         )
     assert not runtime.exists()
+def test_fixture_refusal_translation_preserves_structured_detail() -> None:
+    detail = {"binding": {"file": "app.py", "line": 8}}
+
+    translated = revision_cli._translate(
+        FixtureRefusal("FIXTURE_STALE_REFUSED", detail=detail)
+    )
+
+    assert translated.code == "FIXTURE_STALE_REFUSED"
+    assert translated.detail == detail

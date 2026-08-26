@@ -28,9 +28,14 @@ _SCRUB_KEYS = {
 _INHERITED_ENVIRONMENT_KEYS = {"PATH", "SYSTEMROOT", "TMPDIR", "TEMP", "TMP"}
 _NETWORK_GUARD = (
     "import sys as _guard_sys\n"
+    "import socket as _guard_socket\n"
     "def _guard_audit(event, args):\n"
-    "    if event.startswith('socket.'):\n"
-    "        raise RuntimeError('NETWORK_ACCESS_REFUSED')\n"
+    "    if not event.startswith('socket.'):\n"
+    "        return\n"
+    "    if event == 'socket.__new__' and len(args) >= 4:\n"
+    "        if args[1] in (_guard_socket.AF_INET, _guard_socket.AF_INET6) and args[2] in (_guard_socket.SOCK_STREAM, _guard_socket.SOCK_DGRAM) and args[3] == 0:\n"
+    "            return\n"
+    "    raise RuntimeError('NETWORK_ACCESS_REFUSED')\n"
     "_guard_sys.addaudithook(_guard_audit)\n"
 )
 

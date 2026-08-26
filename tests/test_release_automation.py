@@ -62,8 +62,8 @@ def test_release_workflow_fails_closed_before_trusted_publishing() -> None:
     id_token_permission = "id-token" + ":"
     assert assignment_marker not in release.replace(id_token_permission, "")
     assert "draft" in release and "prerelease" in release
-    assert "breakcheck-2.0.0-py3-none-any.whl" in release
-    assert "breakcheck-2.0.0.tar.gz" in release
+    assert "breakcheck-2.0.1-py3-none-any.whl" in release
+    assert "breakcheck-2.0.1.tar.gz" in release
     assert "sha256sum" in release
     assert "test -z" not in release
     assert release.count("id-token: write") == 1

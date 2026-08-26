@@ -94,7 +94,7 @@ def _install_metadata_view(root: Path) -> None:
 
 
 def run_demo(output_root: str | os.PathLike[str], build) -> int:
-    root = Path(output_root)
+    root = Path(output_root).resolve()
     if root.exists() or root.is_symlink():
         raise ValueError("DEMO_OUTPUT_EXISTS_REFUSED")
     root.mkdir(parents=True)

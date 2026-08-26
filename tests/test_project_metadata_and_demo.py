@@ -15,6 +15,7 @@ import zipfile
 
 import pytest
 
+from breakcheck import cli
 from breakcheck.demo import run_demo
 
 try:
@@ -75,14 +76,14 @@ def _offline_wheelhouse(tmp_path: Path) -> Path:
     _write_packaging_wheel(
         wheelhouse,
         "21.3",
-        "def canonicalize_version(version, strip_trailing_zero=True):\n"
-        "    return version.rstrip('.0') if strip_trailing_zero else version\n",
+        "def canonicalize_version(version):\n"
+        "    return version.rstrip('.0')\n",
     )
     _write_packaging_wheel(
         wheelhouse,
         "22.0",
-        "def canonicalize_version(version):\n"
-        "    return version.rstrip('.0')\n",
+        "def canonicalize_version(version, strip_trailing_zero=True):\n"
+        "    return version.rstrip('.0') if strip_trailing_zero else version\n",
     )
     return wheelhouse
 
@@ -93,6 +94,22 @@ def _line_value(output: str, name: str) -> Path:
         if line.startswith(prefix):
             return Path(line.removeprefix(prefix))
     raise AssertionError(f"missing {prefix!r} in demo output:\n{output}")
+
+
+def _assert_expected_demo_report(report: dict[str, object]) -> None:
+    assert report["schema_version"] == 2
+    payload = report["payload"]
+    assert payload["current_version"] == "21.3"
+    assert payload["new_version"] == "22.0"
+    assert payload["summary"]["changed"] == 1
+    assert len(payload["findings"]) == 1
+    finding = payload["findings"][0]
+    assert finding["verdict"] == "CHANGED"
+    assert finding["old"]["kind"] == "exception"
+    assert finding["old"]["exception_class"] == "TypeError"
+    assert "unexpected keyword argument" in finding["old"]["payload"][0]
+    assert finding["new"]["kind"] == "value"
+    assert finding["new"]["payload"] == "1.0.0"
 
 
 def _python_without_build_backend(tmp_path: Path, executable: Path | None = None) -> Path:
@@ -125,7 +142,7 @@ def _python_without_build_backend(tmp_path: Path, executable: Path | None = None
 
 def test_current_project_metadata_and_public_artifacts_are_declared():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    assert project["project"]["version"] == "2.0.0"
+    assert project["project"]["version"] == "2.0.1"
     assert project["project"]["authors"] == [{"name": "ViDale Lovett"}]
     assert project["project"]["urls"] == {
         "Homepage": "https://github.com/lovettsendit/breakcheck",
@@ -134,7 +151,7 @@ def test_current_project_metadata_and_public_artifacts_are_declared():
         "Changelog": "https://github.com/lovettsendit/breakcheck/blob/main/CHANGELOG.md",
     }
     assert "Copyright (c) 2026 ViDale Lovett and contributors" in (ROOT / "LICENSE").read_text()
-    assert "## 2.0.0 - 2026-08-26" in (ROOT / "CHANGELOG.md").read_text()
+    assert "## 2.0.1 - 2026-08-26" in (ROOT / "CHANGELOG.md").read_text()
     manifest = (ROOT / "MANIFEST.in").read_text()
     assert "include SKILL.md" in manifest
     assert "graft examples" in manifest
@@ -179,17 +196,7 @@ def test_demo_uses_installed_breakcheck_without_a_build_backend(tmp_path: Path):
         assert root.is_dir()
         assert report_path.is_file()
         assert evidence_path.is_file()
-        report = json.loads(report_path.read_text())
-        assert report["schema_version"] == 2
-        assert report["payload"]["summary"]["changed"] == 1
-        assert len(report["payload"]["findings"]) == 1
-        finding = report["payload"]["findings"][0]
-        assert finding["verdict"] == "CHANGED"
-        assert finding["old"]["kind"] == "value"
-        assert finding["old"]["payload"] == "1.0.0"
-        assert finding["new"]["kind"] == "exception"
-        assert finding["new"]["exception_class"] == "TypeError"
-        assert "unexpected keyword argument" in finding["new"]["payload"][0]
+        _assert_expected_demo_report(json.loads(report_path.read_text()))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -212,6 +219,7 @@ def test_demo_source_checkout_fallback_does_not_require_a_build_backend(tmp_path
         env=os.environ
         | {
             "BREAKCHECK_DEMO_WHEELHOUSE": str(wheelhouse),
+            "BREAKCHECK_DEMO_KEEP": "1",
             "PYTHON": str(python),
             "PYTHONPATH": "",
         },
@@ -224,6 +232,14 @@ def test_demo_source_checkout_fallback_does_not_require_a_build_backend(tmp_path
     assert "BUILD_BACKEND_MUST_NOT_RUN" not in result.stderr
     assert "CALLER_ENVIRONMENT_MUST_NOT_BE_MODIFIED" not in result.stderr
     assert "DEMO_VERDICT=PASS" in result.stdout
+    root = _line_value(result.stdout, "DEMO_ROOT")
+    report_path = _line_value(result.stdout, "REPORT_PATH")
+    try:
+        assert root.is_dir()
+        assert report_path.is_file()
+        _assert_expected_demo_report(json.loads(report_path.read_text()))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_builtin_demo_refuses_an_unverified_artifact_bundle(tmp_path: Path) -> None:
@@ -236,3 +252,34 @@ def test_builtin_demo_refuses_an_unverified_artifact_bundle(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="^DEMO_VERIFICATION_REFUSED$"):
         run_demo(tmp_path / "demo", write_unverified_bundle)
+
+
+def test_builtin_demo_accepts_a_relative_output_root(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Changing into the demo repository must not invalidate output paths."""
+
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["demo", "--output-root", ".breakcheck/demo"]) == 0
+
+    captured = capsys.readouterr()
+    assert "CHANGED" in captured.out
+    assert "Traceback" not in captured.err
+    assert (tmp_path / ".breakcheck" / "demo" / "report.json").is_file()
+    assert (tmp_path / ".breakcheck" / "demo" / "evidence.json").is_file()
+
+
+def test_builtin_demo_reports_a_bounded_refusal_without_a_traceback(
+    tmp_path: Path, capsys
+) -> None:
+    """Expected demo refusals are CLI results, not unhandled exceptions."""
+
+    output_root = tmp_path / "existing"
+    output_root.mkdir()
+
+    assert cli.main(["demo", "--output-root", str(output_root)]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "DEMO_REFUSED:DEMO_OUTPUT_EXISTS_REFUSED"
+    assert "Traceback" not in captured.err

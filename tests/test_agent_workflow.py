@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "SKILL.md"
 DISCOVERY = ROOT / "AGENTS.md"
+README = ROOT / "README.md"
 
 
 def _skill_text() -> str:
@@ -72,3 +73,20 @@ def test_repository_discovery_file_routes_automation_to_the_skill():
     text = DISCOVERY.read_text(encoding="utf-8")
     assert "[SKILL.md](SKILL.md)" in text
     assert "Never weaken coverage or separation policy" in text
+
+
+def test_fixture_suggestion_guidance_distinguishes_scan_and_replay_modes():
+    readme = README.read_text(encoding="utf-8")
+    skill = _skill_text()
+    for text in (readme, skill):
+        lowered = text.lower()
+        assert "without `--wheelhouse`" in text
+        assert "G2" in text
+        assert "G3_UNNORMALIZABLE" in text
+        assert 'projection = ""' in text
+        assert "outcome" in text
+        assert "impure" in lowered
+        assert "nondeterministic" in lowered
+    assert "isolated replay" in readme
+    assert "does not invent a projection" in readme
+    assert "human review" in readme

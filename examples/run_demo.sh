@@ -83,7 +83,7 @@ if [ -z "${BREAKCHECK_DEMO_WHEELHOUSE:-}" ]; then
 fi
 
 TOOL_PYTHON="$PYTHON"
-if "$PYTHON" -c 'import breakcheck; raise SystemExit(0 if breakcheck.__version__ == "2.0.0" else 1)' 2>/dev/null; then
+if "$PYTHON" -c 'import breakcheck; raise SystemExit(0 if breakcheck.__version__ == "2.0.1" else 1)' 2>/dev/null; then
     BREAKCHECK_IMPORT_ROOT=$("$PYTHON" -c 'from pathlib import Path; import breakcheck; print(Path(breakcheck.__file__).resolve().parent.parent)')
 else
     BREAKCHECK_IMPORT_ROOT="$CHECKOUT/src"
@@ -133,10 +133,22 @@ if report.get("schema_version") != 2 or report.get("artifact_kind") != "dependen
 payload = report.get("payload", {})
 findings = payload.get("findings")
 summary = payload.get("summary")
+if payload.get("current_version") != "21.3" or payload.get("new_version") != "22.0":
+    raise SystemExit("BREAKCHECK_DEMO_REFUSED: expected packaging 21.3 to 22.0")
 if not isinstance(findings, list) or len(findings) != 1:
     raise SystemExit("BREAKCHECK_DEMO_REFUSED: expected exactly one finding")
-if findings[0].get("verdict") != "CHANGED":
+finding = findings[0]
+if finding.get("verdict") != "CHANGED":
     raise SystemExit("BREAKCHECK_DEMO_REFUSED: expected CHANGED finding")
+old = finding.get("old")
+new = finding.get("new")
+if not isinstance(old, dict) or old.get("kind") != "exception" or old.get("exception_class") != "TypeError":
+    raise SystemExit("BREAKCHECK_DEMO_REFUSED: unexpected packaging 21.3 observation")
+old_payload = old.get("payload")
+if not isinstance(old_payload, list) or not old_payload or "unexpected keyword argument" not in str(old_payload[0]):
+    raise SystemExit("BREAKCHECK_DEMO_REFUSED: missing changed-behavior detail")
+if not isinstance(new, dict) or new.get("kind") != "value" or new.get("payload") != "1.0.0":
+    raise SystemExit("BREAKCHECK_DEMO_REFUSED: unexpected packaging 22.0 observation")
 if not isinstance(summary, dict) or summary.get("changed") != 1:
     raise SystemExit("BREAKCHECK_DEMO_REFUSED: expected summary.changed == 1")
 PY

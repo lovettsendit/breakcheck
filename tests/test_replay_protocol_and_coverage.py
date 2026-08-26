@@ -77,8 +77,65 @@ def test_rich_object_is_refused_without_repr_fallback():
 
 
 def test_network_timeout_and_output_limit_are_typed_refusals():
+    legacy_allocation = executor.run_snippet_isolated(
+        snippet_source=(
+            "import socket\n"
+            "candidate = socket.socket()\n"
+            "candidate.close()\n"
+            "print(repr(True))\n"
+        )
+    )
+    assert legacy_allocation["returncode"] == 0
+    assert legacy_allocation["stdout"].strip() == b"True"
+
+    allocation = executor.run_typed_snippet_isolated(
+        snippet_source=(
+            "import socket\n"
+            "candidate = socket.socket()\n"
+            "outcome = candidate.family == socket.AF_INET\n"
+            "candidate.close()\n"
+        )
+    )
+    assert allocation["status"] == "VALUE"
+    assert allocation["observation"]["payload"] is True
+
+    local_pair = executor.run_typed_snippet_isolated(
+        snippet_source=(
+            "import socket\n"
+            "left, right = socket.socketpair()\n"
+            "left.send(b'x')\n"
+            "outcome = right.recv(1)\n"
+        )
+    )
+    assert local_pair["status"] == "NETWORK_REFUSED"
+    assert local_pair["reason_code"] == "NETWORK_ACCESS_REFUSED"
+
+    raw_socket = executor.run_typed_snippet_isolated(
+        snippet_source=(
+            "import socket\n"
+            "outcome = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)\n"
+        )
+    )
+    assert raw_socket["status"] == "NETWORK_REFUSED"
+    assert raw_socket["reason_code"] == "NETWORK_ACCESS_REFUSED"
+
+    public_bind = executor.run_typed_snippet_isolated(
+        snippet_source=(
+            "import socket\n"
+            "candidate = socket.socket()\n"
+            "candidate.bind(('0.0.0.0', 0))\n"
+            "outcome = 'unreachable'\n"
+        )
+    )
+    assert public_bind["status"] == "NETWORK_REFUSED"
+
     network = executor.run_typed_snippet_isolated(
-        snippet_source="import socket\noutcome = socket.socket()\n"
+        snippet_source=(
+            "import socket\n"
+            "candidate = socket.socket()\n"
+            "candidate.connect(('127.0.0.1', 9))\n"
+            "outcome = 'unreachable'\n"
+        )
     )
     assert network["status"] == "NETWORK_REFUSED"
     assert network["observation"] is None
@@ -87,15 +144,23 @@ def test_network_timeout_and_output_limit_are_typed_refusals():
     caught_network = executor.run_typed_snippet_isolated(
         snippet_source=(
             "import socket\n"
+            "candidate = socket.socket()\n"
             "try:\n"
-            "    socket.socket()\n"
+            "    candidate.connect(('127.0.0.1', 9))\n"
             "except BaseException:\n"
             "    pass\n"
+            "candidate.close()\n"
             "outcome = 'attempt was caught'\n"
         )
     )
     assert caught_network["status"] == "NETWORK_REFUSED"
     assert caught_network["observation"] is None
+
+    name_resolution = executor.run_typed_snippet_isolated(
+        snippet_source="import socket\noutcome = socket.getaddrinfo('example.com', 443)\n"
+    )
+    assert name_resolution["status"] == "NETWORK_REFUSED"
+    assert name_resolution["reason_code"] == "NETWORK_ACCESS_REFUSED"
 
     timeout = executor.run_typed_snippet_isolated(
         snippet_source="import time\ntime.sleep(5)\noutcome = 1\n",

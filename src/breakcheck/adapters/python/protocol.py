@@ -233,6 +233,7 @@ import hashlib as _bc_hashlib
 import json as _bc_json
 import math as _bc_math
 import os as _bc_os
+import socket as _bc_socket
 import struct as _bc_struct
 import sys as _bc_sys
 
@@ -256,9 +257,13 @@ class _BreakcheckUnnormalizable(BaseException):
         self.raw_type = raw_type
 
 def _bc_audit(event, args):
-    if event.startswith("socket."):
-        _bc_network_attempted[0] = True
-        raise _BreakcheckNetworkRefused()
+    if not event.startswith("socket."):
+        return
+    if event == "socket.__new__" and len(args) >= 4:
+        if args[1] in (_bc_socket.AF_INET, _bc_socket.AF_INET6) and args[2] in (_bc_socket.SOCK_STREAM, _bc_socket.SOCK_DGRAM) and args[3] == 0:
+            return
+    _bc_network_attempted[0] = True
+    raise _BreakcheckNetworkRefused()
 
 _bc_network_attempted = [False]
 _bc_sys.addaudithook(_bc_audit)

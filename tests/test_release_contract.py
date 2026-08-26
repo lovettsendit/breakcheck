@@ -70,6 +70,59 @@ def test_platform_refusal(monkeypatch, tmp_path, capsys):
     assert result == 2
     assert 'BUILD_REFUSED:' + PLATFORM_REFUSAL in capsys.readouterr().err
 
+
+@pytest.mark.parametrize("value", ("0", "-1", "100.1", "nan"))
+def test_min_coverage_is_rejected_before_execution_without_a_traceback(
+    value, capsys
+):
+    module = importlib.import_module(CLI_MODULE)
+
+    with pytest.raises(SystemExit) as exc:
+        module.main(["coverage-probe@1.0", "--min-coverage", value])
+
+    assert int(exc.value.code or 0) == 2
+    error = capsys.readouterr().err
+    assert "MIN_COVERAGE_REFUSED" in error
+    assert "Traceback" not in error
+
+
+@pytest.mark.parametrize(
+    ("distribution", "import_root"),
+    [
+        ("PyYAML", "yaml"),
+        ("beautifulsoup4", "bs4"),
+        ("Pillow", "PIL"),
+        ("python-dateutil", "dateutil"),
+    ],
+)
+def test_known_distribution_names_resolve_to_their_public_import_roots(
+    monkeypatch, distribution, import_root
+):
+    module = importlib.import_module(CLI_MODULE)
+    monkeypatch.setattr(
+        module._metadata,
+        "distribution",
+        lambda _name: (_ for _ in ()).throw(module._metadata.PackageNotFoundError()),
+    )
+
+    assert module._import_root(distribution) == import_root
+
+
+def test_duplicate_exact_wheels_are_a_bounded_cli_refusal(monkeypatch, capsys):
+    module = importlib.import_module(CLI_MODULE)
+    monkeypatch.setattr(
+        module,
+        "_build",
+        lambda _args: (_ for _ in ()).throw(
+            RuntimeError("AMBIGUOUS_WHEEL_REFUSED:sample==1.0")
+        ),
+    )
+
+    assert module.main(["sample@2.0", "--wheelhouse", "wheelhouse"]) == 2
+    error = capsys.readouterr().err
+    assert error.strip() == "BUILD_REFUSED:AMBIGUOUS_WHEEL_REFUSED"
+    assert "Traceback" not in error
+
 def test_report_tamper():
     verify = getattr(importlib.import_module(VERIFIER_MODULE), VERIFIER_FUNCTION)
     with pytest.raises(ValueError):
