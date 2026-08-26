@@ -533,6 +533,33 @@ def test_symlinked_wheel_refuses(tmp_path):
         envs._local_wheel(wheelhouse, "sample", "1.0")
 
 
+def test_failed_offline_install_explains_that_the_wheelhouse_needs_dependencies(
+    tmp_path,
+):
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    (wheelhouse / "sample-1.0-py3-none-any.whl").write_bytes(b"placeholder")
+
+    def failed_install(_argv, **_kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="No matching distribution")
+
+    with pytest.raises(envs.EnvironmentRefusal) as captured:
+        envs._install(
+            wheelhouse,
+            "sample",
+            "1.0",
+            False,
+            runner=failed_install,
+            environment=tmp_path,
+        )
+
+    assert captured.value.code == "ENVIRONMENT_INSTALL_REFUSED"
+    assert captured.value.detail == {
+        "requirement": "sample==1.0",
+        "wheelhouse_requirement": "complete_dependency_closure",
+    }
+
+
 def test_build_venv_rolls_back_both_environments_on_second_install_failure(
     monkeypatch, tmp_path
 ):

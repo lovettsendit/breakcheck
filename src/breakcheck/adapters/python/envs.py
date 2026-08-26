@@ -16,6 +16,15 @@ _KEYWORDS = ("allow_network", "current_version", "destination", "environment",
              "new_version", "package", "version", "wheelhouse")
 
 
+class EnvironmentRefusal(RuntimeError):
+    """A bounded environment-construction failure safe for CLI reporting."""
+
+    def __init__(self, code, *, detail=None):
+        self.code = code
+        self.detail = None if detail is None else dict(detail)
+        super().__init__(code)
+
+
 def _normalized_distribution(value):
     return re.sub(r"[-_.]+", "-", str(value)).lower()
 
@@ -74,12 +83,20 @@ def _install(wheelhouse, package, version, allow_network, runner=None, environme
     else:
         argv.append(requirement)
     execute = runner or subprocess.run
+    refusal_detail = {
+        "requirement": requirement,
+        "wheelhouse_requirement": "complete_dependency_closure",
+    }
     try:
         result = execute(argv, check=False, capture_output=True, text=True, shell=False)
     except Exception as exc:
-        raise RuntimeError('INSTALL_FAILED') from exc
+        raise EnvironmentRefusal(
+            "ENVIRONMENT_INSTALL_REFUSED", detail=refusal_detail
+        ) from exc
     if getattr(result, "returncode", 1) != 0:
-        raise RuntimeError('INSTALL_FAILED')
+        raise EnvironmentRefusal(
+            "ENVIRONMENT_INSTALL_REFUSED", detail=refusal_detail
+        )
     return result
 
 

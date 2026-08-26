@@ -43,12 +43,26 @@ _HELP_PREFIX = (
     "The default coverage threshold is 80 percent. Refusal codes: "
 )
 _MISSING_CURRENT = "CURRENT_DISTRIBUTION_MISSING"
+_MIN_COVERAGE_REFUSAL_CODE = "MIN_COVERAGE_REFUSED"
+_DEMO_REFUSAL_CODES = frozenset(
+    (
+        "DEMO_EXECUTION_REFUSED",
+        "DEMO_OUTPUT_EXISTS_REFUSED",
+        "DEMO_VERIFICATION_REFUSED",
+    )
+)
+_IMPORT_ROOT_OVERRIDES = {
+    "beautifulsoup4": "bs4",
+    "pillow": "PIL",
+    "pyyaml": "yaml",
+    "python-dateutil": "dateutil",
+}
 
 _SUPPORTED_PLATFORMS = frozenset(('linux', 'darwin'))
 _PLATFORM_REFUSAL_CODE = 'PLATFORM_REFUSED'
 _WHEELHOUSE_REQUIRED_CODE = 'WHEELHOUSE_REQUIRED'
 _OPERATIONAL_EXCEPTION_CODES = {'ImportError': 'PIPELINE_IMPORT_REFUSED', 'OSError': 'FILESYSTEM_REFUSED', 'UnicodeError': 'TEXT_ENCODING_REFUSED'}
-_DECLARED_REFUSAL_CODES = (frozenset(('NONLITERAL_ARGS', 'CURRENT_DISTRIBUTION_MISSING', 'PLATFORM_REFUSED', 'WHEELHOUSE_REQUIRED', 'MISSING_WHEEL_REFUSED', 'PIPELINE_IMPORT_REFUSED', 'FILESYSTEM_REFUSED', 'TEXT_ENCODING_REFUSED')) | frozenset(('API_ABSENT_BOTH_ENVIRONMENTS', 'CALL_SITE_PATH_REFUSED', 'CALL_SITE_SCAN_REFUSED', 'CALL_SITE_SCHEMA_REFUSED', 'CALL_SITE_SOURCE_REFUSED', 'ENVIRONMENT_ARTIFACT_SYMLINK_REFUSED', 'ENVIRONMENT_FINGERPRINT_REFUSED', 'ENVIRONMENT_PAIR_REFUSED', 'IMPORT_ROOT_REFUSED', 'INVENTORY_ROOT_SYMLINK_REFUSED', 'OBSERVATION_ENCODING_REFUSED', 'OUTPUT_PATH_COLLISION_REFUSED', 'OUTPUT_PATH_REFUSED', 'PRESENCE_CENSUS_REFUSED', 'SOURCE_SYNTAX_REFUSED', 'TARGET_GRAMMAR_REFUSED', 'UNSUPPORTED_USAGE_SCHEMA_REFUSED', 'WHEELHOUSE_REFUSED')) | _FIXTURE_REFUSALS)
+_DECLARED_REFUSAL_CODES = (frozenset(('NONLITERAL_ARGS', 'CURRENT_DISTRIBUTION_MISSING', 'PLATFORM_REFUSED', 'WHEELHOUSE_REQUIRED', 'MISSING_WHEEL_REFUSED', 'AMBIGUOUS_WHEEL_REFUSED', 'PIPELINE_IMPORT_REFUSED', 'FILESYSTEM_REFUSED', 'TEXT_ENCODING_REFUSED', 'ENVIRONMENT_INSTALL_REFUSED', _MIN_COVERAGE_REFUSAL_CODE)) | frozenset(('API_ABSENT_BOTH_ENVIRONMENTS', 'CALL_SITE_PATH_REFUSED', 'CALL_SITE_SCAN_REFUSED', 'CALL_SITE_SCHEMA_REFUSED', 'CALL_SITE_SOURCE_REFUSED', 'ENVIRONMENT_ARTIFACT_SYMLINK_REFUSED', 'ENVIRONMENT_FINGERPRINT_REFUSED', 'ENVIRONMENT_PAIR_REFUSED', 'IMPORT_ROOT_REFUSED', 'INVENTORY_ROOT_SYMLINK_REFUSED', 'OBSERVATION_ENCODING_REFUSED', 'OUTPUT_PATH_COLLISION_REFUSED', 'OUTPUT_PATH_REFUSED', 'PRESENCE_CENSUS_REFUSED', 'SOURCE_SYNTAX_REFUSED', 'TARGET_GRAMMAR_REFUSED', 'UNSUPPORTED_USAGE_SCHEMA_REFUSED', 'WHEELHOUSE_REFUSED')) | _FIXTURE_REFUSALS | _DEMO_REFUSAL_CODES)
 _HELP = _HELP_PREFIX + ','.join(sorted(_DECLARED_REFUSAL_CODES))
 
 def _bounded_refusal(exc):
@@ -65,12 +79,28 @@ def _bounded_refusal(exc):
 def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
+
+def _print_refusal_detail(exc):
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        print("REFUSAL_DETAIL:" + _canonical(detail), file=sys.stderr)
+
 def _digest(value):
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 def _bounded_workers(value):
     if value < 1: raise ValueError("workers must be positive")
     return min(value, 8)
+
+
+def _coverage_threshold(value):
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(_MIN_COVERAGE_REFUSAL_CODE) from exc
+    if not 0 < threshold <= 100:
+        raise argparse.ArgumentTypeError(_MIN_COVERAGE_REFUSAL_CODE)
+    return threshold
 
 def _target(value):
     if not isinstance(value, str) or value.count("@") != 1:
@@ -82,6 +112,10 @@ def _target(value):
     return package, version
 
 def _import_root(package):
+    distribution_key = re.sub(r"[-_.]+", "-", str(package)).lower()
+    override = _IMPORT_ROOT_OVERRIDES.get(distribution_key)
+    if override is not None:
+        return override
     try:
         distribution = _metadata.distribution(package)
         declared = distribution.read_text("top_level.txt") or ""
@@ -206,16 +240,25 @@ def _call_sources(root, grouped, inventory):
             nodes = matches[(line, column)]
             if not nodes:
                 raise ValueError("CALL_SITE_SOURCE_REFUSED")
-            source = _node_source(lines, nodes[0])
+            api = requested[(relative, line, column)]
+            selected = []
+            for node in nodes:
+                try:
+                    import_statement = _replay_import_statement(tree, node, api)
+                except ValueError as exc:
+                    if str(exc) != "CALL_SITE_SOURCE_REFUSED":
+                        raise
+                    continue
+                selected.append((node, import_statement))
+            if len(selected) != 1:
+                raise ValueError("CALL_SITE_SOURCE_REFUSED")
+            node, import_statement = selected[0]
+            source = _node_source(lines, node)
             if not isinstance(source, str) or not source:
                 raise ValueError("CALL_SITE_SOURCE_REFUSED")
             result[(relative, line, column)] = {
                 "expression": source,
-                "import_statement": _replay_import_statement(
-                    tree,
-                    nodes[0],
-                    requested[(relative, line, column)],
-                ),
+                "import_statement": import_statement,
                 "module_constants": static_context.module_constants,
                 "imported_names": static_context.imported_names,
             }
@@ -309,9 +352,7 @@ def _scan_inventory(root, package, inventory):
     }
 
 
-def _fixture_suggestions(args, repository, scan, inventory):
-    from breakcheck.adapters.python.fixtures import suggest_fixtures
-
+def _fixture_suggestion_candidates(repository, scan, inventory):
     grouped = {}
     for row in scan["call_sites"]:
         grouped.setdefault(row["api"], []).append(
@@ -337,6 +378,12 @@ def _fixture_suggestions(args, repository, scan, inventory):
                     "nearby_source": source["expression"],
                 }
             )
+    return candidates
+
+
+def _write_fixture_suggestions(args, repository, candidates):
+    from breakcheck.adapters.python.fixtures import suggest_fixtures
+
     digest = suggest_fixtures(
         args.suggest_fixtures,
         candidates,
@@ -352,6 +399,7 @@ def _fixture_suggestions(args, repository, scan, inventory):
         )
     )
     return 0
+
 
 def _observation_text(data):
     try:
@@ -890,8 +938,13 @@ def _build_with_runtime(args, runtime_root):
     call_sites = scan.get("call_sites") if isinstance(scan, dict) else None
     if not isinstance(call_sites, list):
         raise ValueError("CALL_SITE_SCAN_REFUSED")
-    if getattr(args, "suggest_fixtures", None):
-        return _fixture_suggestions(args, repository, scan, inventory)
+    suggesting_fixtures = bool(getattr(args, "suggest_fixtures", None))
+    suggestion_candidates = (
+        _fixture_suggestion_candidates(repository, scan, inventory)
+        if suggesting_fixtures else []
+    )
+    if suggesting_fixtures and not wheelhouse:
+        return _write_fixture_suggestions(args, repository, suggestion_candidates)
     try:
         current_version = _metadata.version(package)
     except Exception:
@@ -926,6 +979,8 @@ def _build_with_runtime(args, runtime_root):
     except Exception as exc:
         code = _bounded_refusal(exc)
         if code is None:
+            raise
+        if isinstance(getattr(exc, "detail", None), dict):
             raise
         raise RuntimeError(code) from None
     if not isinstance(pair, dict) or set(pair) != {"current", "new"}:
@@ -1054,6 +1109,32 @@ def _build_with_runtime(args, runtime_root):
                 old_run.get("status") == "UNNORMALIZABLE"
                 or new_run.get("status") == "UNNORMALIZABLE"
             )
+            if (
+                suggesting_fixtures
+                and unnormalizable
+                and old_run.get("repeatable") is True
+                and new_run.get("repeatable") is True
+            ):
+                old_type = _typed_raw_type(old_run)
+                new_type = _typed_raw_type(new_run)
+                raw_type = old_type if old_type == new_type else _canonical(
+                    {"current": old_type, "new": new_type}
+                )
+                suggestion_candidates.append(
+                    {
+                        "api": api,
+                        "file": row["site"][0],
+                        "line": row["site"][1],
+                        "column": row["site"][2],
+                        "signature": None,
+                        "type_hints": None,
+                        "nearby_source": expression,
+                        "coverage_bucket": "G3_UNNORMALIZABLE",
+                        "reason_code": reason,
+                        "raw_type": raw_type,
+                        "projection_required": True,
+                    }
+                )
             terminal_records.append(terminal_record(
                 row["candidate"],
                 "G3_UNNORMALIZABLE" if unnormalizable else "G4_IMPURE",
@@ -1117,6 +1198,8 @@ def _build_with_runtime(args, runtime_root):
             "EXERCISED",
             provenance=row["provenance"],
         ))
+    if suggesting_fixtures:
+        return _write_fixture_suggestions(args, repository, suggestion_candidates)
     findings.sort(key=lambda row: row["finding_id"])
     witnesses.sort(key=lambda row: row["witness_id"])
     changed = sum(row["verdict"] in {"CHANGED", "CHANGED_UNDER_PROJECTION"} for row in findings)
@@ -1217,6 +1300,7 @@ def _capabilities():
             "claim_attestation",
             "dependency_comparison",
             "fixture_suggestions",
+            "projection_suggestions",
             "revision_baselines",
             "revision_comparison",
         ],
@@ -1344,7 +1428,7 @@ def _revision_parser(command):
         )
         parser.add_argument(
             "--min-coverage",
-            type=float,
+            type=_coverage_threshold,
             default=80.0,
             help="minimum exercised target percentage (default: 80)",
         )
@@ -1375,7 +1459,7 @@ def _revision_parser(command):
         )
         parser.add_argument(
             "--min-coverage",
-            type=float,
+            type=_coverage_threshold,
             default=80.0,
             help="minimum exercised target percentage (default: 80)",
         )
@@ -1458,6 +1542,7 @@ def _revision_command(command, argv):
         return _emit_revision_result(result, args)
     except RevisionModeRefusal as exc:
         print("REVISION_REFUSED:" + exc.code, file=sys.stderr)
+        _print_refusal_detail(exc)
         return 2
     except ValueError:
         print("REVISION_REFUSED:ARTIFACT_INPUT_REFUSED", file=sys.stderr)
@@ -1506,7 +1591,7 @@ def main(argv=None):
     )
     parser.add_argument('--suggest-fixtures', help="write fixture suggestions for unexercised calls")
     parser.add_argument(
-        '--min-coverage', type=float, default=80.0, help="minimum exercised percentage (default: 80)"
+        '--min-coverage', type=_coverage_threshold, default=80.0, help="minimum exercised percentage (default: 80)"
     )
     parser.add_argument(
         '--allow-empty', action="store_true", help="permit an empty comparison and record that choice"
@@ -1532,7 +1617,14 @@ def main(argv=None):
             mode="demo",
             allowed=("--output-root",),
         )
-        return _demo(args.output_root)
+        try:
+            return _demo(args.output_root)
+        except ValueError as exc:
+            code = str(exc)
+            if code not in _DEMO_REFUSAL_CODES:
+                raise
+            print("DEMO_REFUSED:" + code, file=sys.stderr)
+            return 2
     if args.verify:
         if args.target:
             parser.error("verify mode is exclusive")
@@ -1554,6 +1646,7 @@ def main(argv=None):
         if code is None:
             raise
         print("BUILD_REFUSED:" + code, file=sys.stderr)
+        _print_refusal_detail(exc)
         return 2
 
 if __name__ == "__main__":

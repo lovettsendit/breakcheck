@@ -71,6 +71,8 @@ python -m pip download --only-binary=:all: --dest wheelhouse 'attrs==24.2.0'
 
 Download exact versions in separate commands. Asking `pip download` to resolve two versions of the same distribution in one command can produce a dependency-resolution error.
 
+Do not use `--no-deps`: the wheelhouse must contain the complete transitive dependency closure needed by both versions. If offline installation cannot resolve that closure, Breakcheck refuses with `ENVIRONMENT_INSTALL_REFUSED` and identifies the requirement without exposing pip output or local paths.
+
 Run the comparison:
 
 ```console
@@ -116,7 +118,7 @@ Every discovered candidate reaches exactly one terminal bucket:
 
 ### Generate fixture suggestions
 
-When source arguments cannot be resolved statically, generate a reviewable skeleton without creating replay environments:
+For a fast static pass, run `--suggest-fixtures` without `--wheelhouse`. This scans for unresolved G2 arguments and generates reviewable skeletons without creating replay environments:
 
 ```console
 breakcheck attrs@24.2.0 \
@@ -124,6 +126,16 @@ breakcheck attrs@24.2.0 \
 ```
 
 The generated file identifies each unresolved call by repository-relative file, line, column, API, and nearby source. A human or coding tool fills in concrete expressions and changes `fixture_authored_by` from `unknown` to `human` or `agent`.
+
+To also find deterministic rich results that reach `G3_UNNORMALIZABLE`, supply the explicit wheelhouse used for comparison:
+
+```console
+breakcheck attrs@24.2.0 \
+  --wheelhouse wheelhouse \
+  --suggest-fixtures breakcheck.fixtures.toml
+```
+
+With `--wheelhouse`, Breakcheck performs isolated replay in both dependency environments. A repeatable rich result adds a skeleton marked `G3_UNNORMALIZABLE` with `projection = ""`. Breakcheck does not invent a projection: an agent or human must fill in a stable expression that references `outcome`, then present the fixture diff for human review. Impure or nondeterministic calls remain excluded from replay-backed suggestions.
 
 Example:
 
@@ -411,7 +423,7 @@ To build release artifacts:
 ```console
 python -m pip install 'build>=1.2,<2'
 python -m build
-python -m pip install dist/breakcheck-2.0.0-py3-none-any.whl
+python -m pip install dist/breakcheck-2.0.1-py3-none-any.whl
 breakcheck --capabilities --json
 ```
 

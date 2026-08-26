@@ -10,6 +10,8 @@ import pytest
 
 from breakcheck import cli
 from breakcheck import revision_cli
+from breakcheck.adapters.python import envs
+from breakcheck.adapters.python.fixtures import FixtureRefusal
 from breakcheck.adapters.python.literals import synthesize_snippet
 from breakcheck.report import finding_id
 from breakcheck.verify import verify_report
@@ -330,6 +332,183 @@ def test_suggest_fixtures_needs_no_wheelhouse(monkeypatch, tmp_path):
     assert 'api = "sample.api"' in rendered
     assert 'fixture_authored_by = "unknown"' in rendered
     assert "sample.api(object())" in rendered
+
+
+def test_collocated_chained_call_selects_the_scanned_dependency_api(
+    monkeypatch, tmp_path
+):
+    source = tmp_path / "app.py"
+    source.write_text(
+        "import click\n\n"
+        "def decorate(function):\n"
+        "    return click.option('--flag', callback=function)(function)\n",
+        encoding="utf-8",
+    )
+    scan = {
+        "call_sites": [
+            {"api": "click.option", "file": "app.py", "line": 4, "column": 11}
+        ]
+    }
+    monkeypatch.setattr(cli, "_synthesize", synthesize_snippet, raising=False)
+
+    candidates = cli._fixture_suggestion_candidates(
+        tmp_path, scan, {source.resolve()}
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["api"] == "click.option"
+    assert candidates[0]["nearby_source"] == "click.option('--flag', callback=function)"
+
+
+def test_dependency_refusal_prints_canonical_fixture_detail(monkeypatch, capsys):
+    detail = {
+        "binding": {"file": "app.py", "line": 8, "column": 9, "api": "sample.api"},
+        "inventory_candidates": [
+            {
+                "file": "app.py",
+                "line": 7,
+                "column": 0,
+                "api": "sample.api",
+                "mismatched_fields": ["line", "column"],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        cli,
+        "_build",
+        lambda _args: (_ for _ in ()).throw(
+            FixtureRefusal("FIXTURE_STALE_REFUSED", detail=detail)
+        ),
+    )
+
+    result = cli.main(["sample@2.0", "--wheelhouse", "wheelhouse"])
+
+    assert result == 2
+    assert capsys.readouterr().err.splitlines() == [
+        "BUILD_REFUSED:FIXTURE_STALE_REFUSED",
+        "REFUSAL_DETAIL:" + json.dumps(detail, sort_keys=True, separators=(",", ":")),
+    ]
+
+
+def test_environment_install_detail_survives_the_build_boundary(
+    monkeypatch, tmp_path, capsys
+):
+    source = tmp_path / "app.py"
+    source.write_text("import sample\nsample.api()\n", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+    pipeline = list(_fake_pipeline(source, runtime, []))
+
+    class RefusingEnvironmentBuilder:
+        def __init__(self, **_kwargs):
+            pass
+
+        def build(self):
+            raise envs.EnvironmentRefusal(
+                "ENVIRONMENT_INSTALL_REFUSED",
+                detail={
+                    "requirement": "sample==1.0",
+                    "wheelhouse_requirement": "complete_dependency_closure",
+                },
+            )
+
+    pipeline[3] = RefusingEnvironmentBuilder
+    monkeypatch.setattr(cli, "_load_pipeline", lambda: tuple(pipeline))
+    monkeypatch.setattr(cli._metadata, "version", lambda _package: "1.0")
+    monkeypatch.setattr(cli, "_import_root", lambda _package: "sample")
+    monkeypatch.chdir(tmp_path)
+
+    result = cli.main(
+        ["sample@2.0", "--wheelhouse", str(tmp_path / "wheelhouse")]
+    )
+
+    assert result == 2
+    assert capsys.readouterr().err.splitlines() == [
+        "BUILD_REFUSED:ENVIRONMENT_INSTALL_REFUSED",
+        'REFUSAL_DETAIL:{"requirement":"sample==1.0",'
+        '"wheelhouse_requirement":"complete_dependency_closure"}',
+    ]
+
+
+def test_replay_backed_suggestions_include_repeatable_rich_results(
+    monkeypatch, tmp_path, capsys
+):
+    source = tmp_path / "app.py"
+    source.write_text("import sample\nsample.api()\n", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+    destination = tmp_path / "suggested.toml"
+    executions: list[tuple[str, str]] = []
+    monkeypatch.setattr(cli, "_load_pipeline", lambda: _fake_pipeline(source, runtime, executions))
+    monkeypatch.setattr(cli._metadata, "version", lambda _package: "1.0")
+    monkeypatch.setattr(cli, "_import_root", lambda _package: "sample")
+    monkeypatch.setattr(
+        cli,
+        "_repeat_observation",
+        lambda _snippet, _environment: {
+            "runs": [{"raw_type": "SampleResult"}, {"raw_type": "SampleResult"}],
+            "repeatable": True,
+            "status": "UNNORMALIZABLE",
+            "reason_code": "UNSTABLE_OBSERVATION_REFUSED",
+            "observation": None,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = cli.main(
+        [
+            "sample@2.0",
+            "--wheelhouse",
+            str(tmp_path / "wheelhouse"),
+            "--suggest-fixtures",
+            str(destination),
+        ]
+    )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["fixture_suggestions"] == 1
+    rendered = destination.read_text(encoding="utf-8")
+    assert "# coverage_bucket: G3_UNNORMALIZABLE" in rendered
+    assert "# raw_type: SampleResult" in rendered
+    assert 'projection = ""' in rendered
+
+
+def test_replay_backed_suggestions_exclude_impure_or_nondeterministic_calls(
+    monkeypatch, tmp_path, capsys
+):
+    source = tmp_path / "app.py"
+    source.write_text("import sample\nsample.api()\n", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+    destination = tmp_path / "suggested.toml"
+    executions: list[tuple[str, str]] = []
+    monkeypatch.setattr(cli, "_load_pipeline", lambda: _fake_pipeline(source, runtime, executions))
+    monkeypatch.setattr(cli._metadata, "version", lambda _package: "1.0")
+    monkeypatch.setattr(cli, "_import_root", lambda _package: "sample")
+    monkeypatch.setattr(
+        cli,
+        "_repeat_observation",
+        lambda _snippet, _environment: {
+            "runs": [],
+            "repeatable": False,
+            "status": "PROTOCOL_REFUSED",
+            "reason_code": "NONDETERMINISTIC_OBSERVATION",
+            "observation": None,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = cli.main(
+        [
+            "sample@2.0",
+            "--wheelhouse",
+            str(tmp_path / "wheelhouse"),
+            "--suggest-fixtures",
+            str(destination),
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["fixture_suggestions"] == 0
+    assert "[[binding]]" not in destination.read_text(encoding="utf-8")
 
 
 def test_operator_fixture_replays_a_nonliteral_call(monkeypatch, tmp_path):

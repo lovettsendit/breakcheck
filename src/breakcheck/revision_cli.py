@@ -63,8 +63,9 @@ _CHANGED_STATUSES = frozenset(
 class RevisionModeRefusal(ValueError):
     """A revision command could not produce evidence without guessing."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, detail: Mapping[str, object] | None = None):
         self.code = code
+        self.detail = None if detail is None else dict(detail)
         super().__init__(code)
 
 
@@ -103,7 +104,11 @@ def _translate(exc: Exception) -> RevisionModeRefusal:
     code = getattr(exc, "code", None)
     if type(code) is not str or not code:
         code = str(exc) if str(exc) else "REVISION_MODE_REFUSED"
-    return RevisionModeRefusal(code)
+    detail = getattr(exc, "detail", None)
+    return RevisionModeRefusal(
+        code,
+        detail=detail if isinstance(detail, Mapping) else None,
+    )
 
 
 def _git(repository: Path, *arguments: str) -> bytes:

@@ -87,9 +87,22 @@ _MAX_CONTEXT_BYTES = 512
 class FixtureRefusal(ValueError):
     """A stable fail-closed fixture refusal."""
 
-    def __init__(self, code: str):
+    def __init__(
+        self,
+        code: str,
+        *,
+        line: int | None = None,
+        detail: Mapping[str, object] | None = None,
+    ):
         self.code = code
-        super().__init__(code)
+        self.line = line
+        self.detail = (
+            {"line": line}
+            if detail is None and line is not None
+            else None if detail is None else dict(detail)
+        )
+        message = code if line is None else f"{code}:line={line}"
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -118,10 +131,15 @@ class FixtureFile:
     canonical_sha256: str
 
 
-def _refuse(code: str) -> None:
+def _refuse(
+    code: str,
+    *,
+    line: int | None = None,
+    detail: Mapping[str, object] | None = None,
+) -> None:
     if code not in REFUSAL_CODES:
         raise RuntimeError("FIXTURE_REFUSAL_UNDECLARED")
-    raise FixtureRefusal(code)
+    raise FixtureRefusal(code, line=line, detail=detail)
 
 
 def _canonical(value: object) -> bytes:
@@ -135,21 +153,25 @@ def _digest(value: object) -> str:
 
 
 def _strip_comment(line: str) -> str:
-    quoted = False
+    quote: str | None = None
     escaped = False
     for index, character in enumerate(line):
         if escaped:
             escaped = False
             continue
-        if quoted and character == "\\":
+        if quote == '"' and character == "\\":
             escaped = True
             continue
-        if character == '"':
-            quoted = not quoted
+        if quote is not None:
+            if character == quote:
+                quote = None
             continue
-        if character == "#" and not quoted:
+        if character in ('"', "'"):
+            quote = character
+            continue
+        if character == "#":
             return line[:index]
-    if quoted or escaped:
+    if quote is not None or escaped:
         _refuse("FIXTURE_SYNTAX_REFUSED")
     return line
 
@@ -157,20 +179,22 @@ def _strip_comment(line: str) -> str:
 def _split_unquoted(value: str, delimiter: str) -> list[str]:
     pieces: list[str] = []
     start = 0
-    quoted = False
+    quote: str | None = None
     escaped = False
     nesting = 0
     for index, character in enumerate(value):
         if escaped:
             escaped = False
             continue
-        if quoted and character == "\\":
+        if quote == '"' and character == "\\":
             escaped = True
             continue
-        if character == '"':
-            quoted = not quoted
+        if quote is not None:
+            if character == quote:
+                quote = None
             continue
-        if quoted:
+        if character in ('"', "'"):
+            quote = character
             continue
         if character in "[{(":
             nesting += 1
@@ -181,22 +205,83 @@ def _split_unquoted(value: str, delimiter: str) -> list[str]:
         elif character == delimiter and nesting == 0:
             pieces.append(value[start:index])
             start = index + 1
-    if quoted or escaped or nesting != 0:
+    if quote is not None or escaped or nesting != 0:
         _refuse("FIXTURE_SYNTAX_REFUSED")
     pieces.append(value[start:])
     return pieces
 
 
+def _decode_basic_string(value: str, *, multiline: bool) -> str:
+    decoded: list[str] = []
+    index = 0
+    escapes = {
+        "b": "\b",
+        "t": "\t",
+        "n": "\n",
+        "f": "\f",
+        "r": "\r",
+        '"': '"',
+        "\\": "\\",
+    }
+    while index < len(value):
+        character = value[index]
+        if character != "\\":
+            if character == '"' and not multiline:
+                _refuse("FIXTURE_SYNTAX_REFUSED")
+            if ord(character) < 0x20 and character not in ("\t", "\n"):
+                _refuse("FIXTURE_SYNTAX_REFUSED")
+            if character == "\n" and not multiline:
+                _refuse("FIXTURE_SYNTAX_REFUSED")
+            decoded.append(character)
+            index += 1
+            continue
+        index += 1
+        if index >= len(value):
+            _refuse("FIXTURE_SYNTAX_REFUSED")
+        escaped = value[index]
+        if multiline and escaped == "\n":
+            index += 1
+            while index < len(value) and value[index] in (" ", "\t", "\n"):
+                index += 1
+            continue
+        if escaped in escapes:
+            decoded.append(escapes[escaped])
+            index += 1
+            continue
+        if escaped in ("u", "U"):
+            width = 4 if escaped == "u" else 8
+            digits = value[index + 1 : index + 1 + width]
+            if len(digits) != width or not re.fullmatch(r"[0-9A-Fa-f]+", digits):
+                _refuse("FIXTURE_SYNTAX_REFUSED")
+            codepoint = int(digits, 16)
+            if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+                _refuse("FIXTURE_SYNTAX_REFUSED")
+            decoded.append(chr(codepoint))
+            index += width + 1
+            continue
+        _refuse("FIXTURE_SYNTAX_REFUSED")
+    return "".join(decoded)
+
+
 def _parse_string(value: str) -> str:
-    if not value.startswith('"') or not value.endswith('"'):
-        _refuse("FIXTURE_SYNTAX_REFUSED")
-    try:
-        parsed = json.loads(value)
-    except (json.JSONDecodeError, UnicodeError):
-        _refuse("FIXTURE_SYNTAX_REFUSED")
-    if not isinstance(parsed, str):
-        _refuse("FIXTURE_SYNTAX_REFUSED")
-    return parsed
+    if value.startswith('"""') and value.endswith('"""') and len(value) >= 6:
+        content = value[3:-3]
+        if content.startswith("\n"):
+            content = content[1:]
+        return _decode_basic_string(content, multiline=True)
+    if value.startswith("'''") and value.endswith("'''") and len(value) >= 6:
+        content = value[3:-3]
+        return content[1:] if content.startswith("\n") else content
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        return _decode_basic_string(value[1:-1], multiline=False)
+    if value.startswith("'") and value.endswith("'") and len(value) >= 2:
+        content = value[1:-1]
+        if "'" in content or "\n" in content or "\r" in content:
+            _refuse("FIXTURE_SYNTAX_REFUSED")
+        if any(ord(character) < 0x20 and character != "\t" for character in content):
+            _refuse("FIXTURE_SYNTAX_REFUSED")
+        return content
+    _refuse("FIXTURE_SYNTAX_REFUSED")
 
 
 def _parse_string_array(value: str) -> list[str]:
@@ -246,37 +331,95 @@ def _parse_value(field: str, raw: str) -> object:
     return _parse_string(raw)
 
 
+def _triple_string_end(value: str, delimiter: str) -> int | None:
+    position = 3
+    while True:
+        found = value.find(delimiter, position)
+        if found < 0:
+            return None
+        if delimiter == "'''":
+            return found
+        backslashes = 0
+        cursor = found - 1
+        while cursor >= 0 and value[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            return found
+        position = found + 1
+
+
+def _collect_multiline_string(
+    lines: Sequence[str], start: int, raw_value: str
+) -> tuple[str, int]:
+    delimiter = raw_value[:3]
+    combined = raw_value
+    end = start
+    while True:
+        closing = _triple_string_end(combined, delimiter)
+        if closing is not None:
+            trailing = combined[closing + 3 :].strip()
+            if trailing and not trailing.startswith("#"):
+                _refuse("FIXTURE_SYNTAX_REFUSED")
+            return combined[: closing + 3], end
+        end += 1
+        if end >= len(lines):
+            _refuse("FIXTURE_SYNTAX_REFUSED")
+        combined += "\n" + lines[end]
+
+
 def _parse_document(text: str) -> tuple[dict[str, object], list[dict[str, object]]]:
     top: dict[str, object] = {}
     bindings: list[dict[str, object]] = []
     current: dict[str, object] = top
-    for raw_line in text.splitlines():
-        line = _strip_comment(raw_line).strip()
-        if not line:
-            continue
-        if line == "[[binding]]":
-            if len(bindings) >= _MAX_BINDINGS:
-                _refuse("FIXTURE_BINDING_CAP_REFUSED")
-            current = {}
-            bindings.append(current)
-            continue
-        if line.startswith("["):
-            _refuse("FIXTURE_SCHEMA_REFUSED")
-        if "=" not in line:
-            _refuse("FIXTURE_SYNTAX_REFUSED")
-        key, raw_value = line.split("=", 1)
-        key = key.strip()
-        raw_value = raw_value.strip()
-        allowed = (
-            _TOP_LEVEL_FIELDS
-            if current is top
-            else _BINDING_REQUIRED_FIELDS | _BINDING_OPTIONAL_FIELDS
-        )
-        if key not in allowed:
-            _refuse("FIXTURE_SCHEMA_REFUSED")
-        if key in current:
-            _refuse("FIXTURE_DUPLICATE_FIELD_REFUSED")
-        current[key] = _parse_value(key, raw_value)
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line_number = index + 1
+        try:
+            raw_line = lines[index]
+            probe = raw_line.strip()
+            triple_assignment = False
+            if "=" in probe:
+                _, probe_value = probe.split("=", 1)
+                triple_assignment = probe_value.strip().startswith(('"""', "'''"))
+            line = probe if triple_assignment else _strip_comment(raw_line).strip()
+            if not line:
+                index += 1
+                continue
+            if line == "[[binding]]":
+                if len(bindings) >= _MAX_BINDINGS:
+                    _refuse("FIXTURE_BINDING_CAP_REFUSED")
+                current = {}
+                bindings.append(current)
+                index += 1
+                continue
+            if line.startswith("["):
+                _refuse("FIXTURE_SCHEMA_REFUSED")
+            if "=" not in line:
+                _refuse("FIXTURE_SYNTAX_REFUSED")
+            key, raw_value = line.split("=", 1)
+            key = key.strip()
+            raw_value = raw_value.strip()
+            if raw_value.startswith(('"""', "'''")):
+                raw_value, index = _collect_multiline_string(
+                    lines, index, raw_value
+                )
+            allowed = (
+                _TOP_LEVEL_FIELDS
+                if current is top
+                else _BINDING_REQUIRED_FIELDS | _BINDING_OPTIONAL_FIELDS
+            )
+            if key not in allowed:
+                _refuse("FIXTURE_SCHEMA_REFUSED")
+            if key in current:
+                _refuse("FIXTURE_DUPLICATE_FIELD_REFUSED")
+            current[key] = _parse_value(key, raw_value)
+            index += 1
+        except FixtureRefusal as exc:
+            if exc.code == "FIXTURE_SYNTAX_REFUSED" and exc.line is None:
+                raise FixtureRefusal(exc.code, line=line_number) from None
+            raise
     if set(top) != _TOP_LEVEL_FIELDS:
         _refuse("FIXTURE_SCHEMA_REFUSED")
     return top, bindings
@@ -406,9 +549,12 @@ def _binding_payload(row: Mapping[str, object]) -> dict[str, object]:
 
 def _inventory_keys(
     inventory: Iterable[Mapping[str, object]],
-) -> tuple[dict[tuple[str, int, int, str], int], set[tuple[str, str]]]:
+) -> tuple[
+    dict[tuple[str, int, int, str], int],
+    dict[tuple[str, str], list[tuple[str, int, int, str]]],
+]:
     counts: dict[tuple[str, int, int, str], int] = {}
-    nearby: set[tuple[str, str]] = set()
+    nearby: dict[tuple[str, str], list[tuple[str, int, int, str]]] = {}
     try:
         rows = list(inventory)
     except TypeError:
@@ -434,7 +580,9 @@ def _inventory_keys(
             _refuse("FIXTURE_INVENTORY_REFUSED")
         key = (file_name, line, column, api)
         counts[key] = counts.get(key, 0) + 1
-        nearby.add((file_name, api))
+        nearby.setdefault((file_name, api), []).append(key)
+    for values in nearby.values():
+        values.sort(key=lambda item: (item[1], item[2], item[0], item[3]))
     return counts, nearby
 
 
@@ -477,8 +625,34 @@ def load_fixture_file(
         if matches > 1:
             _refuse("FIXTURE_AMBIGUOUS_REFUSED")
         if matches == 0:
-            if (key[0], key[3]) in nearby:
-                _refuse("FIXTURE_STALE_REFUSED")
+            candidates = nearby.get((key[0], key[3]), [])
+            if candidates:
+                binding = {
+                    "file": key[0], "line": key[1], "column": key[2], "api": key[3]
+                }
+                inventory_candidates = []
+                for candidate_key in candidates:
+                    mismatched_fields = []
+                    if candidate_key[1] != key[1]:
+                        mismatched_fields.append("line")
+                    if candidate_key[2] != key[2]:
+                        mismatched_fields.append("column")
+                    inventory_candidates.append(
+                        {
+                            "file": candidate_key[0],
+                            "line": candidate_key[1],
+                            "column": candidate_key[2],
+                            "api": candidate_key[3],
+                            "mismatched_fields": mismatched_fields,
+                        }
+                    )
+                _refuse(
+                    "FIXTURE_STALE_REFUSED",
+                    detail={
+                        "binding": binding,
+                        "inventory_candidates": inventory_candidates,
+                    },
+                )
             _refuse("FIXTURE_UNMATCHED_REFUSED")
         binding_sha256 = _digest(payload)
         payloads.append(payload)
@@ -604,12 +778,24 @@ def suggest_fixtures(
         if key in seen:
             _refuse("FIXTURE_AMBIGUOUS_REFUSED")
         seen.add(key)
+        projection_required = candidate.get("projection_required", False)
+        if type(projection_required) is not bool:
+            _refuse("FIXTURE_INVENTORY_REFUSED")
+        coverage_bucket = _context(candidate.get("coverage_bucket"))
+        reason_code = _context(candidate.get("reason_code"))
+        raw_type = _context(candidate.get("raw_type"))
+        if projection_required and coverage_bucket != "G3_UNNORMALIZABLE":
+            _refuse("FIXTURE_INVENTORY_REFUSED")
         normalized.append(
             {
                 "key": key,
                 "signature": _context(candidate.get("signature")),
                 "type_hints": _context(candidate.get("type_hints")),
                 "nearby_source": _context(candidate.get("nearby_source")),
+                "coverage_bucket": coverage_bucket,
+                "reason_code": reason_code,
+                "raw_type": raw_type,
+                "projection_required": projection_required,
             }
         )
     normalized.sort(key=lambda item: item["key"])
@@ -621,7 +807,14 @@ def suggest_fixtures(
     for item in normalized:
         file_name, line, column, api = item["key"]
         lines.append("")
-        for label in ("signature", "type_hints", "nearby_source"):
+        for label in (
+            "signature",
+            "type_hints",
+            "nearby_source",
+            "coverage_bucket",
+            "reason_code",
+            "raw_type",
+        ):
             if item[label] is not None:
                 lines.append("# " + label + ": " + str(item[label]))
         lines.extend(
@@ -636,6 +829,13 @@ def suggest_fixtures(
                 "kwargs = {}",
             ]
         )
+        if item["projection_required"]:
+            lines.extend(
+                [
+                    "# Projection must reference outcome and reduce it to stable, normalizable data.",
+                    'projection = ""',
+                ]
+            )
     data = ("\n".join(lines) + "\n").encode("utf-8")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):

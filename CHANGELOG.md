@@ -2,6 +2,19 @@
 
 All notable changes to Breakcheck are documented here.
 
+## 2.0.1 - 2026-08-26
+
+- Resolved relative demo output roots before entering the generated repository.
+- Reported expected demo refusals as bounded CLI errors without Python tracebacks.
+- Accepted documented multiline and literal TOML fixture strings and reported syntax-error line numbers.
+- Rejected invalid coverage thresholds before replay with `MIN_COVERAGE_REFUSED`.
+- Added replay-backed fixture suggestions for deterministic rich results while leaving projection choice under explicit review.
+- Reported exact line and column drift for stale fixture bindings without changing refusal codes.
+- Required the shell demonstration to prove the expected `packaging` 21.3-to-22.0 observations before reporting success.
+- Allowed only inert INET/INET6 non-raw socket allocation while refusing local socket pairs, bind, connect, name-resolution, and other socket operations.
+- Resolved common distribution/import-name differences for PyYAML, Beautiful Soup, Pillow, and python-dateutil.
+- Bounded offline installation and duplicate-wheel failures with actionable refusal codes.
+
 ## 2.0.0 - 2026-08-26
 
 - Added PyPI-ready project metadata and trusted release automation.

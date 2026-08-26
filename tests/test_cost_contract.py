@@ -26,6 +26,7 @@ def test_capabilities_are_one_noninteractive_machine_readable_command(capsys):
     assert payload["platforms"] == ["linux", "macos"]
     assert "dependency_comparison" in payload["features"]
     assert "fixture_suggestions" in payload["features"]
+    assert "projection_suggestions" in payload["features"]
     assert "revision_comparison" in payload["features"]
     assert "claim_attestation" in payload["features"]
     assert elapsed < 5.0

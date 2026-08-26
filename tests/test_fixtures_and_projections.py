@@ -71,6 +71,47 @@ def test_valid_fixture_is_closed_matched_and_hash_stable(tmp_path: Path) -> None
     assert binding.binding_sha256 == second.bindings[0].binding_sha256
 
 
+def test_documented_multiline_setup_is_valid_toml(tmp_path: Path) -> None:
+    text = _fixture_text().replace(
+        'setup = "class Point:\\n    pass"',
+        'setup = """\nclass Point:\n    pass\n"""',
+    )
+    path = _write_fixture(tmp_path, text)
+
+    fixture = load_fixture_file(path, repository_root=tmp_path, inventory=INVENTORY)
+
+    assert fixture.bindings[0].setup == "class Point:\n    pass\n"
+
+
+def test_toml_literal_strings_are_accepted_in_fixture_values(tmp_path: Path) -> None:
+    text = _fixture_text().replace(
+        'args = ["Point(1, 2)"]', "args = ['Point(1, 2)']"
+    ).replace(
+        'kwargs = { strict = "True" }', "kwargs = { strict = 'True' }"
+    )
+    path = _write_fixture(tmp_path, text)
+
+    fixture = load_fixture_file(path, repository_root=tmp_path, inventory=INVENTORY)
+
+    binding = fixture.bindings[0]
+    assert binding.args == ("Point(1, 2)",)
+    assert binding.kwargs == (("strict", "True"),)
+
+
+def test_fixture_syntax_refusal_identifies_the_source_line(tmp_path: Path) -> None:
+    path = _write_fixture(
+        tmp_path,
+        _fixture_text().replace(
+            'args = ["Point(1, 2)"]', 'args = ["unterminated]'
+        ),
+    )
+
+    with pytest.raises(
+        FixtureRefusal, match=r"^FIXTURE_SYNTAX_REFUSED:line=9$"
+    ):
+        load_fixture_file(path, repository_root=tmp_path, inventory=INVENTORY)
+
+
 def test_fixture_rendering_preserves_reviewed_source_without_executing_it(
     tmp_path: Path,
 ) -> None:
@@ -165,6 +206,39 @@ def test_inventory_matching_refuses_duplicate_stale_unmatched_and_ambiguous(
 
     with pytest.raises(FixtureRefusal, match=code):
         load_fixture_file(path, repository_root=tmp_path, inventory=inventory)
+
+
+def test_stale_fixture_reports_the_exact_drift_without_changing_its_code(
+    tmp_path: Path,
+) -> None:
+    path = _write_fixture(
+        tmp_path,
+        _fixture_text().replace("line = 7", "line = 8").replace("column = 4", "column = 9"),
+    )
+
+    with pytest.raises(FixtureRefusal) as captured:
+        load_fixture_file(path, repository_root=tmp_path, inventory=INVENTORY)
+
+    refusal = captured.value
+    assert refusal.code == "FIXTURE_STALE_REFUSED"
+    assert str(refusal) == "FIXTURE_STALE_REFUSED"
+    assert refusal.detail == {
+        "binding": {
+            "api": "attrs.has",
+            "column": 9,
+            "file": "src/app.py",
+            "line": 8,
+        },
+        "inventory_candidates": [
+            {
+                "api": "attrs.has",
+                "column": 4,
+                "file": "src/app.py",
+                "line": 7,
+                "mismatched_fields": ["line", "column"],
+            }
+        ],
+    }
 
 
 def test_source_and_projection_caps_fail_closed(tmp_path: Path) -> None:
@@ -262,6 +336,38 @@ def test_suggestions_are_deterministic_contextual_warn_and_never_overwrite(
     second_destination = tmp_path / "second.toml"
     suggest_fixtures(second_destination, list(reversed(candidates)), repository_root=tmp_path)
     assert second_destination.read_text(encoding="utf-8") == text
+
+
+def test_rich_result_suggestion_requests_a_projection_without_inventing_one(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "breakcheck.fixtures.toml"
+
+    suggest_fixtures(
+        destination,
+        [
+            {
+                "file": "src/app.py",
+                "line": 11,
+                "column": 4,
+                "api": "attrs.define",
+                "nearby_source": "attrs.define(slots=True)",
+                "coverage_bucket": "G3_UNNORMALIZABLE",
+                "reason_code": "UNSTABLE_OBSERVATION_REFUSED",
+                "raw_type": "type",
+                "projection_required": True,
+            }
+        ],
+        repository_root=tmp_path,
+    )
+
+    rendered = destination.read_text(encoding="utf-8")
+    assert "# coverage_bucket: G3_UNNORMALIZABLE" in rendered
+    assert "# reason_code: UNSTABLE_OBSERVATION_REFUSED" in rendered
+    assert "# raw_type: type" in rendered
+    assert "# Projection must reference outcome" in rendered
+    assert 'projection = ""' in rendered
+    assert "type(outcome).__name__" not in rendered
 
 
 def test_metrics_require_observed_inputs_and_do_not_invent_values() -> None:

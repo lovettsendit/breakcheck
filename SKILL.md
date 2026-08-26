@@ -7,11 +7,13 @@ description: Use when a Python dependency version changes or when a code change 
 
 ## Purpose
 
-Use Breakcheck as the deterministic measurement step after proposing a dependency upgrade or a behavior-preserving code change. A coding agent may propose inputs and interpret results; Breakcheck owns replay, comparison, refusal, and evidence.
+Use Breakcheck after proposing a dependency upgrade or behavior-preserving change. A coding tool may propose inputs; Breakcheck owns replay, comparison, refusal, and evidence.
 
 ## Dependency upgrades
 
-Run from the repository root after preparing exact trusted wheels in a local wheelhouse:
+Run from the repository root with trusted wheels:
+
+The wheelhouse must include the complete transitive dependency closure for both compared versions. Do not use `pip download --no-deps`.
 
 ```console
 breakcheck PACKAGE@NEW_VERSION \
@@ -22,13 +24,21 @@ breakcheck PACKAGE@NEW_VERSION \
   --json --ci
 ```
 
-If coverage is limited by unresolved arguments, generate proposals with:
+For fast G2 proposals, run without `--wheelhouse`:
 
 ```console
 breakcheck PACKAGE@NEW_VERSION --suggest-fixtures breakcheck.fixtures.toml
 ```
 
-Fill only fixtures that can be justified from repository context, mark `fixture_authored_by = "agent"`, and present the fixture diff for human review before replay.
+To also suggest fixtures for repeatable `G3_UNNORMALIZABLE` rich results, use isolated replay against the exact wheelhouse:
+
+```console
+breakcheck PACKAGE@NEW_VERSION \
+  --wheelhouse wheelhouse \
+  --suggest-fixtures breakcheck.fixtures.toml
+```
+
+Replay-backed rich-result skeletons contain `projection = ""`. Breakcheck does not supply the projection. Fill it only with a stable expression referencing `outcome`, mark `fixture_authored_by = "agent"`, and present the fixture diff for human review. Impure and nondeterministic calls remain excluded.
 
 ## Behavior-preserving code changes
 
@@ -40,7 +50,7 @@ Fixtures must be authored, reviewed, and committed against the base revision bef
 4. Run `breakcheck attest` against the changed revision.
 5. Report every disposition verbatim to the human, including all unverifiable and out-of-scope counts.
 
-An explicit comparison between committed revisions is also available:
+Compare committed revisions:
 
 ```console
 breakcheck diff \
@@ -51,7 +61,7 @@ breakcheck diff \
   --evidence .breakcheck/revision-evidence.json
 ```
 
-For an explicit preservation claim, create a reviewed `breakcheck.claim.toml` and run:
+Attest a reviewed `breakcheck.claim.toml`:
 
 ```console
 breakcheck attest \
@@ -78,4 +88,4 @@ breakcheck attest \
 - Never modify verdict or verification logic as part of the change being verified.
 - Inspect and sanitize artifacts before sending them to an external service; they may contain source locations, replay source, arguments, setup, projections, and observed values.
 
-Report the exact Breakcheck command, exit code, verdict counts, and artifact paths alongside the ordinary project test results.
+Report the command, exit code, verdict counts, artifact paths, and project tests.
