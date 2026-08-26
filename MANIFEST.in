@@ -1,0 +1,12 @@
+include CHANGELOG.md
+include CONTRIBUTING.md
+include LICENSE
+include README.md
+include SECURITY.md
+recursive-include release_evidence *.json
+recursive-include src/breakcheck *.py
+recursive-include tests *.py
+global-exclude *.py[cod]
+global-exclude .DS_Store
+global-exclude ._*
+prune .breakcheck

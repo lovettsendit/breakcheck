@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=77", "wheel>=0.43"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "breakcheck"
+version = "1.0.0"
+description = "Offline behavioral compatibility checks for Python dependency upgrades."
+requires-python = ">=3.10,<3.14"
+dependencies = []
+authors = [{name = "breakcheck contributors"}]
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+keywords = [
+  "behavioral-compatibility",
+  "ci",
+  "compatibility",
+  "dependency-management",
+  "deterministic",
+  "offline",
+  "python",
+  "regression-testing",
+  "testing",
+  "upgrades",
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Software Development :: Testing",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+dev = ["build>=1.2,<2", "pytest>=8,<9"]
+
+[project.scripts]
+"breakcheck" = "breakcheck.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

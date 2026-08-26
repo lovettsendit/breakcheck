@@ -1,0 +1,13 @@
+# Changelog
+
+All notable changes to Breakcheck are documented here.
+
+## 1.0.0 - 2026-08-25
+
+- First standalone production release.
+- Added offline deterministic upgrade replay and integrity verification.
+- Refuse APIs absent from both environments instead of counting them as exercised.
+- Bind complete replay environments, finding identities, witness identities, and observation hashes.
+- Terminate descendant process groups on timeout and bound captured output in memory.
+- Refuse malformed Python source, invalid UTF-8 observations, symlinked inventory roots, and escaping wheel inputs.
+- Provide transactional environment rollback, clean wheel and source-distribution installation, public CI, and complete operator documentation.
