@@ -10,11 +10,15 @@ import signal
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 CI jobs
+    import tomli as tomllib
 
 from breakcheck import cli
 from breakcheck.adapters.python import envs, executor, files, scanner
