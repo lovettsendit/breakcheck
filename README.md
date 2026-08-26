@@ -9,7 +9,7 @@ Breakcheck does not update dependencies and does not guess whether a change is s
 Breakcheck evaluates one dependency upgrade in an existing Python repository. Start from the repository root, with the currently used dependency installed:
 
 ```console
-python -m pip install /path/to/breakcheck-1.0.0-py3-none-any.whl
+python -m pip install /path/to/breakcheck-1.0.1-py3-none-any.whl
 mkdir -p wheelhouse .breakcheck/results
 python -m pip download --only-binary=:all: --dest wheelhouse 'attrs==23.2.0'
 python -m pip download --only-binary=:all: --dest wheelhouse 'attrs==24.2.0'
@@ -91,7 +91,7 @@ To build and install the distributable wheel:
 ```console
 python -m pip install 'build>=1.2,<2'
 python -m build
-python -m pip install dist/breakcheck-1.0.0-py3-none-any.whl
+python -m pip install dist/breakcheck-1.0.1-py3-none-any.whl
 breakcheck --help
 ```
 

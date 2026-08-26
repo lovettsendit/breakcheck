@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "breakcheck"
-version = "1.0.0"
+version = "1.0.1"
 description = "Offline behavioral compatibility checks for Python dependency upgrades."
 requires-python = ">=3.10,<3.14"
 dependencies = []

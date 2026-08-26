@@ -106,11 +106,74 @@ def _node_source(lines, node):
     pieces.append(lines[end_line - 1][:end_column])
     return "".join(pieces)
 
+
+def _dotted_name(node):
+    parts = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        raise ValueError("CALL_SITE_SOURCE_REFUSED")
+    parts.append(current.id)
+    parts.reverse()
+    if not all(part.isidentifier() for part in parts):
+        raise ValueError("CALL_SITE_SOURCE_REFUSED")
+    return parts
+
+
+def _replay_import_statement(tree, call, api):
+    call_parts = _dotted_name(call.func)
+    local_root = call_parts[0]
+    suffix = call_parts[1:]
+    candidates = []
+    call_position = (call.lineno, call.col_offset)
+    for node in ast.walk(tree):
+        position = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+        if position > call_position:
+            continue
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local_name = alias.asname or alias.name.split(".")[0]
+                if local_name != local_root:
+                    continue
+                bound = alias.name if alias.asname else alias.name.split(".")[0]
+                if ".".join([bound, *suffix]) != api:
+                    continue
+                statement = "import " + alias.name
+                if alias.asname:
+                    statement += " as " + alias.asname
+                candidates.append((position, statement))
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and node.module
+        ):
+            for alias in node.names:
+                local_name = alias.asname or alias.name
+                if local_name != local_root or alias.name == "*":
+                    continue
+                bound = node.module + "." + alias.name
+                if ".".join([bound, *suffix]) != api:
+                    continue
+                statement = "from " + node.module + " import " + alias.name
+                if alias.asname:
+                    statement += " as " + alias.asname
+                candidates.append((position, statement))
+    if candidates:
+        return sorted(candidates, key=lambda item: (item[0], item[1]))[-1][1]
+    if call_parts == api.split(".") and local_root == api.split(".", 1)[0]:
+        return "import " + local_root
+    raise ValueError("CALL_SITE_SOURCE_REFUSED")
+
 def _call_sources(root, grouped, inventory):
-    requested = {
-        (site["file"], site["line"], site["column"])
-        for sites in grouped.values() for site in sites
-    }
+    requested = {}
+    for api, sites in grouped.items():
+        for site in sites:
+            key = (site["file"], site["line"], site["column"])
+            if key in requested and requested[key] != api:
+                raise ValueError("CALL_SITE_SOURCE_REFUSED")
+            requested[key] = api
     by_file = {}
     for relative, line, column in sorted(requested):
         by_file.setdefault(relative, set()).add((line, column))
@@ -132,7 +195,14 @@ def _call_sources(root, grouped, inventory):
             source = _node_source(lines, nodes[0])
             if not isinstance(source, str) or not source:
                 raise ValueError("CALL_SITE_SOURCE_REFUSED")
-            result[(relative, line, column)] = source
+            result[(relative, line, column)] = {
+                "expression": source,
+                "import_statement": _replay_import_statement(
+                    tree,
+                    nodes[0],
+                    requested[(relative, line, column)],
+                ),
+            }
     return result
 
 def _canonical_call_expression(api, expression):
@@ -447,11 +517,13 @@ def _build(args):
             sites = [{"file": site["file"], "line": site["line"],
                       "column": site["column"]}]
             try:
-                original = call_sources[
+                replay_source = call_sources[
                     (site["file"], site["line"], site["column"])
                 ]
-                expression = _canonical_call_expression(api, original)
-                snippet = _synthesize(expression)
+                expression = replay_source["expression"]
+                snippet = _synthesize(
+                    expression, replay_source["import_statement"]
+                )
             except Exception as exc:
                 reason = (
                     "DYNAMIC_USAGE_UNSUPPORTED"

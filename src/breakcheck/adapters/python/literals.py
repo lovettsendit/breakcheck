@@ -79,16 +79,71 @@ def _call_name(node):
     return ".".join(parts)
 
 
+def _import_source(source):
+    if not isinstance(source, str):
+        _refuse()
+    try:
+        tree = ast.parse(source, mode="exec")
+    except (SyntaxError, ValueError, TypeError):
+        _refuse()
+    if len(tree.body) != 1 or not isinstance(
+        tree.body[0], (ast.Import, ast.ImportFrom)
+    ):
+        _refuse()
+    node = tree.body[0]
+    if len(node.names) != 1 or node.names[0].name == "*":
+        _refuse()
+    alias = node.names[0]
+    if alias.asname is not None and (
+        not alias.asname.isidentifier() or keyword.iskeyword(alias.asname)
+    ):
+        _refuse()
+    if isinstance(node, ast.Import):
+        parts = alias.name.split(".")
+        if not all(part.isidentifier() and not keyword.iskeyword(part) for part in parts):
+            _refuse()
+    else:
+        if node.level != 0 or not node.module:
+            _refuse()
+        module_parts = node.module.split(".")
+        if not all(
+            part.isidentifier() and not keyword.iskeyword(part)
+            for part in module_parts
+        ) or not alias.name.isidentifier() or keyword.iskeyword(alias.name):
+            _refuse()
+    return ast.unparse(node)
+
+
+def _snippet(call, import_statement):
+    api = _call_name(call.func)
+    values = [_lift(item) for item in call.args]
+    keywords = [(item.arg, _lift(item.value)) for item in call.keywords]
+    rendered = [_literal_source(item) for item in values]
+    rendered.extend(
+        name + "=" + _literal_source(value) for name, value in keywords
+    )
+    return (
+        import_statement
+        + "\n\noutcome = "
+        + api
+        + "("
+        + ", ".join(rendered)
+        + ")\nprint(repr(outcome))\n"
+    )
+
+
 def synthesize_snippet(*arguments):
     if len(arguments) == 1 and isinstance(arguments[0], str):
         call = _call_node(arguments[0])
         api = _call_name(call.func)
-        values = [_lift(item) for item in call.args]
-        keywords = [(item.arg, _lift(item.value)) for item in call.keywords]
-        rendered = [_literal_source(item) for item in values]
-        rendered.extend(name + "=" + _literal_source(value) for name, value in keywords)
         root = api.split(".", 1)[0]
-        return "import " + root + "\n\noutcome = " + api + "(" + ", ".join(rendered) + ")\nprint(repr(outcome))\n"
+        return _snippet(call, "import " + root)
+    if (
+        len(arguments) == 2
+        and isinstance(arguments[0], str)
+        and isinstance(arguments[1], str)
+    ):
+        return _snippet(_call_node(arguments[0]), _import_source(arguments[1]))
     if len(arguments) != 2:
         _refuse()
     function_name, node = arguments

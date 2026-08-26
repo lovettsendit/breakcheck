@@ -21,7 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 C
     import tomli as tomllib
 
 from breakcheck import cli
-from breakcheck.adapters.python import envs, executor, files, scanner
+from breakcheck.adapters.python import envs, executor, files, literals, scanner
 from breakcheck.report import finding_id
 from breakcheck.verify import verify_report
 
@@ -175,7 +175,7 @@ def _fake_build(monkeypatch, tmp_path, *, present):
     pipeline = (
         Inventory(),
         Scanner,
-        lambda expression: "print('stable')",
+        lambda expression, import_statement=None: "print('stable')",
         EnvironmentBuilder,
         execute,
         lambda value: copy.deepcopy(value),
@@ -216,6 +216,71 @@ def test_api_absent_in_both_environments_is_not_exercised(monkeypatch, tmp_path)
     assert [row["reason_code"] for row in report["findings"]] == [
         "API_ABSENT_BOTH_ENVIRONMENTS"
     ]
+
+
+@pytest.mark.parametrize(
+    "import_line, call_expression",
+    [
+        (
+            "import samplepkg.tools",
+            "samplepkg.tools.changed(False)",
+        ),
+        (
+            "import samplepkg.tools as tools",
+            "tools.changed(False)",
+        ),
+        (
+            "from samplepkg.tools import changed as check",
+            "check(False)",
+        ),
+    ],
+)
+def test_replay_preserves_exact_static_import_binding(
+    tmp_path, import_line, call_expression
+):
+    """Dropping the observed import must break replay for unexported submodules."""
+    package = tmp_path / "samplepkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "tools.py").write_text(
+        "def changed(value):\n    return value\n", encoding="utf-8"
+    )
+    source = tmp_path / "app.py"
+    source.write_text(
+        import_line + "\n\nOBSERVED = " + call_expression + "\n",
+        encoding="utf-8",
+    )
+
+    observed = scanner.PythonUsageScanner("samplepkg").scan(
+        source=source.read_text(encoding="utf-8"),
+        path="app.py",
+        package="samplepkg",
+    )
+    assert len(observed["call_sites"]) == 1
+    site = observed["call_sites"][0]
+    grouped = {
+        site["api"]: [
+            {
+                "file": site["file"],
+                "line": site["line"],
+                "column": site["column"],
+            }
+        ]
+    }
+    replay_sources = cli._call_sources(tmp_path, grouped, {source.resolve()})
+    replay = replay_sources[(site["file"], site["line"], site["column"])]
+    snippet = literals.synthesize_snippet(
+        replay["expression"], replay["import_statement"]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", snippet],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    assert result.stdout == b"False\n"
 
 
 def test_syntax_error_becomes_explicit_not_exercised_input():

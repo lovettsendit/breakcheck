@@ -2,6 +2,11 @@
 
 All notable changes to Breakcheck are documented here.
 
+## 1.0.1 - 2026-08-26
+
+- Preserve exact static submodule imports and aliases when replaying literal calls.
+- Prevent false `IDENTICAL` findings caused by importing only a distribution's root package.
+
 ## 1.0.0 - 2026-08-25
 
 - First standalone production release.
