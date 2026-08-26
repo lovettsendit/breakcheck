@@ -11,8 +11,8 @@ Breakcheck evaluates one dependency upgrade in an existing Python repository. St
 ```console
 python -m pip install /path/to/breakcheck-1.0.0-py3-none-any.whl
 mkdir -p wheelhouse .breakcheck/results
-python -m pip download --only-binary=:all: --dest wheelhouse \
-  'attrs==23.2.0' 'attrs==24.2.0'
+python -m pip download --only-binary=:all: --dest wheelhouse 'attrs==23.2.0'
+python -m pip download --only-binary=:all: --dest wheelhouse 'attrs==24.2.0'
 breakcheck attrs@24.2.0 \
   --wheelhouse wheelhouse \
   --runtime-root .breakcheck/runtime-001 \
@@ -109,7 +109,8 @@ For example, if the repository currently uses `attrs==23.2.0` and you want to ev
 ```console
 python -m pip install 'attrs==23.2.0'
 mkdir -p wheelhouse
-python -m pip download --only-binary=:all: --dest wheelhouse 'attrs==23.2.0' 'attrs==24.2.0'
+python -m pip download --only-binary=:all: --dest wheelhouse 'attrs==23.2.0'
+python -m pip download --only-binary=:all: --dest wheelhouse 'attrs==24.2.0'
 ```
 
 Treat every wheel in the wheelhouse as executable input. Obtain wheels from a source you trust and preserve their hashes in your own supply-chain records.
