@@ -8,10 +8,13 @@ import importlib.metadata as _metadata
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 import tempfile
 from pathlib import Path
+
+from breakcheck.adapters.python.fixtures import REFUSAL_CODES as _FIXTURE_REFUSALS
 
 def _load_pipeline():
     from breakcheck.adapters.python.files import iter_python_files as inventory
@@ -30,14 +33,22 @@ def _load_pipeline():
             normalize, compare, finding_id, render_json, render_human,
             exit_code, verify_report)
 
-_HELP_PREFIX = 'target grammar: <package>@<new-version>; flags: --json, --ci, --verify, --wheelhouse, --output, --evidence, --runtime-root; an explicit local wheelhouse is required; CI coverage threshold: 80.0; exit 0, exit 3, exit 4; refusal codes: '
+_HELP_PREFIX = (
+    "modes:\n"
+    "  dependency comparison: breakcheck <package>@<new-version> [options]\n"
+    "  offline demonstration: breakcheck demo --output-root <path>\n"
+    "  revision verification: breakcheck {freeze,diff,attest} --help\n"
+    "  machine capabilities: breakcheck --capabilities --json\n\n"
+    "Dependency comparison requires an explicit local wheelhouse. "
+    "The default coverage threshold is 80 percent. Refusal codes: "
+)
 _MISSING_CURRENT = "CURRENT_DISTRIBUTION_MISSING"
 
 _SUPPORTED_PLATFORMS = frozenset(('linux', 'darwin'))
 _PLATFORM_REFUSAL_CODE = 'PLATFORM_REFUSED'
 _WHEELHOUSE_REQUIRED_CODE = 'WHEELHOUSE_REQUIRED'
 _OPERATIONAL_EXCEPTION_CODES = {'ImportError': 'PIPELINE_IMPORT_REFUSED', 'OSError': 'FILESYSTEM_REFUSED', 'UnicodeError': 'TEXT_ENCODING_REFUSED'}
-_DECLARED_REFUSAL_CODES = frozenset(('NONLITERAL_ARGS', 'CURRENT_DISTRIBUTION_MISSING', 'PLATFORM_REFUSED', 'WHEELHOUSE_REQUIRED', 'MISSING_WHEEL_REFUSED', 'PIPELINE_IMPORT_REFUSED', 'FILESYSTEM_REFUSED', 'TEXT_ENCODING_REFUSED')) | frozenset(('API_ABSENT_BOTH_ENVIRONMENTS', 'CALL_SITE_PATH_REFUSED', 'CALL_SITE_SCAN_REFUSED', 'CALL_SITE_SCHEMA_REFUSED', 'CALL_SITE_SOURCE_REFUSED', 'ENVIRONMENT_ARTIFACT_SYMLINK_REFUSED', 'ENVIRONMENT_PAIR_REFUSED', 'IMPORT_ROOT_REFUSED', 'INVENTORY_ROOT_SYMLINK_REFUSED', 'OBSERVATION_ENCODING_REFUSED', 'PRESENCE_CENSUS_REFUSED', 'SOURCE_SYNTAX_REFUSED', 'TARGET_GRAMMAR_REFUSED', 'UNSUPPORTED_USAGE_SCHEMA_REFUSED', 'WHEELHOUSE_REFUSED'))
+_DECLARED_REFUSAL_CODES = (frozenset(('NONLITERAL_ARGS', 'CURRENT_DISTRIBUTION_MISSING', 'PLATFORM_REFUSED', 'WHEELHOUSE_REQUIRED', 'MISSING_WHEEL_REFUSED', 'PIPELINE_IMPORT_REFUSED', 'FILESYSTEM_REFUSED', 'TEXT_ENCODING_REFUSED')) | frozenset(('API_ABSENT_BOTH_ENVIRONMENTS', 'CALL_SITE_PATH_REFUSED', 'CALL_SITE_SCAN_REFUSED', 'CALL_SITE_SCHEMA_REFUSED', 'CALL_SITE_SOURCE_REFUSED', 'ENVIRONMENT_ARTIFACT_SYMLINK_REFUSED', 'ENVIRONMENT_FINGERPRINT_REFUSED', 'ENVIRONMENT_PAIR_REFUSED', 'IMPORT_ROOT_REFUSED', 'INVENTORY_ROOT_SYMLINK_REFUSED', 'OBSERVATION_ENCODING_REFUSED', 'OUTPUT_PATH_COLLISION_REFUSED', 'OUTPUT_PATH_REFUSED', 'PRESENCE_CENSUS_REFUSED', 'SOURCE_SYNTAX_REFUSED', 'TARGET_GRAMMAR_REFUSED', 'UNSUPPORTED_USAGE_SCHEMA_REFUSED', 'WHEELHOUSE_REFUSED')) | _FIXTURE_REFUSALS)
 _HELP = _HELP_PREFIX + ','.join(sorted(_DECLARED_REFUSAL_CODES))
 
 def _bounded_refusal(exc):
@@ -167,6 +178,8 @@ def _replay_import_statement(tree, call, api):
     raise ValueError("CALL_SITE_SOURCE_REFUSED")
 
 def _call_sources(root, grouped, inventory):
+    from breakcheck.adapters.python.scanner import build_static_context
+
     requested = {}
     for api, sites in grouped.items():
         for site in sites:
@@ -183,6 +196,7 @@ def _call_sources(root, grouped, inventory):
         text = path.read_text(encoding="utf-8")
         lines = text.splitlines(keepends=True)
         tree = ast.parse(text, filename=relative)
+        static_context = build_static_context(tree)
         matches = {item: [] for item in by_file[relative]}
         for node in ast.walk(tree):
             key = (getattr(node, "lineno", None), getattr(node, "col_offset", None))
@@ -202,8 +216,39 @@ def _call_sources(root, grouped, inventory):
                     nodes[0],
                     requested[(relative, line, column)],
                 ),
+                "module_constants": static_context.module_constants,
+                "imported_names": static_context.imported_names,
             }
     return result
+
+
+def _synthesize_replay(replay_source):
+    """Return replay source plus deterministic argument provenance.
+
+    Tests and embedders may inject the historical two-argument synthesizer. The
+    production pipeline uses the context-aware synthesizer so bounded folds,
+    module constants, and safe nested calls retain their provenance.
+    """
+
+    from breakcheck.adapters.python.literals import (
+        synthesize_snippet,
+        synthesize_with_provenance,
+    )
+
+    if _synthesize is synthesize_snippet:
+        synthesized = synthesize_with_provenance(
+            replay_source["expression"],
+            replay_source["import_statement"],
+            module_constants=replay_source["module_constants"],
+            imported_names=replay_source["imported_names"],
+        )
+        return synthesized.source, synthesized.provenance
+    return (
+        _synthesize(
+            replay_source["expression"], replay_source["import_statement"]
+        ),
+        ("SOURCE_LITERAL",),
+    )
 
 def _canonical_call_expression(api, expression):
     """Bind a scanned call to its canonical distribution API identity."""
@@ -225,6 +270,7 @@ def _scan_inventory(root, package, inventory):
     imports = []
     call_sites = []
     unsupported = []
+    candidates = []
     for source_path in sorted(
         inventory, key=lambda item: item.relative_to(root).as_posix()
     ):
@@ -238,12 +284,15 @@ def _scan_inventory(root, package, inventory):
         observed_imports = observed.get("imports")
         observed_calls = observed.get("call_sites")
         observed_unsupported = observed.get("unsupported", [])
+        observed_candidates = observed.get("candidates", [])
         if (not isinstance(observed_imports, list) or not isinstance(observed_calls, list)
-                or not isinstance(observed_unsupported, list)):
+                or not isinstance(observed_unsupported, list)
+                or not isinstance(observed_candidates, list)):
             raise ValueError("CALL_SITE_SCAN_REFUSED")
         imports.extend(observed_imports)
         call_sites.extend(observed_calls)
         unsupported.extend(observed_unsupported)
+        candidates.extend(observed_candidates)
     imports.sort(key=lambda row: _canonical(row))
     call_sites.sort(
         key=lambda row: (
@@ -251,7 +300,58 @@ def _scan_inventory(root, package, inventory):
         ) if isinstance(row, dict) else ("", 0, 0, "")
     )
     unsupported.sort(key=lambda row: _canonical(row))
-    return {"imports": imports, "call_sites": call_sites, "unsupported": unsupported}
+    candidates.sort(key=lambda row: _canonical(row))
+    return {
+        "imports": imports,
+        "call_sites": call_sites,
+        "unsupported": unsupported,
+        "candidates": candidates,
+    }
+
+
+def _fixture_suggestions(args, repository, scan, inventory):
+    from breakcheck.adapters.python.fixtures import suggest_fixtures
+
+    grouped = {}
+    for row in scan["call_sites"]:
+        grouped.setdefault(row["api"], []).append(
+            {"file": row["file"], "line": row["line"], "column": row["column"]}
+        )
+    call_sources = _call_sources(repository, grouped, inventory)
+    candidates = []
+    for row in sorted(
+        scan["call_sites"],
+        key=lambda item: (item["file"], item["line"], item["column"], item["api"]),
+    ):
+        source = call_sources[(row["file"], row["line"], row["column"])]
+        try:
+            _synthesize_replay(source)
+        except Exception as exc:
+            if str(exc) != "NONLITERAL_ARGS":
+                raise
+            candidates.append(
+                {
+                    **row,
+                    "signature": None,
+                    "type_hints": None,
+                    "nearby_source": source["expression"],
+                }
+            )
+    digest = suggest_fixtures(
+        args.suggest_fixtures,
+        candidates,
+        repository_root=repository,
+    )
+    print(
+        _canonical(
+            {
+                "schema_version": 1,
+                "fixture_suggestions": len(candidates),
+                "sha256": digest,
+            }
+        )
+    )
+    return 0
 
 def _observation_text(data):
     try:
@@ -282,6 +382,253 @@ def _process_observation(result):
     return _normalize({"kind": "exception", "payload": [message.strip()],
                        "exception_class": exception_class,
                        "duration_ms": None})
+
+
+def _repeat_observation(snippet, environment):
+    """Run an admitted snippet exactly twice and fail closed on disagreement.
+
+    The injected legacy runner branch preserves the narrow test seam used by the
+    schema-1 compatibility suite.  Production always uses the framed private
+    protocol, so ordinary stdout can never impersonate an observation.
+    """
+    from breakcheck.adapters.python.executor import (
+        run_repeated_typed_snippet_isolated,
+        run_snippet_isolated,
+    )
+
+    if _execute is run_snippet_isolated:
+        return run_repeated_typed_snippet_isolated(
+            snippet_source=snippet,
+            environment=environment,
+        )
+    runs = []
+    for _ in range(2):
+        observation = _process_observation(
+            _execute(snippet_source=snippet, environment=environment)
+        )
+        runs.append(observation)
+    if _digest(runs[0]) != _digest(runs[1]):
+        return {
+            "runs": runs,
+            "repeatable": False,
+            "status": "PROTOCOL_REFUSED",
+            "reason_code": "NONDETERMINISTIC_OBSERVATION",
+            "observation": None,
+        }
+    return {
+        "runs": runs,
+        "repeatable": True,
+        "status": "VALUE" if runs[0]["kind"] == "value" else "EXCEPTION",
+        "reason_code": None,
+        "observation": runs[0],
+    }
+
+
+def _typed_refusal(run):
+    if run.get("status") in {"VALUE", "EXCEPTION"} and run.get("repeatable"):
+        return None
+    reason = run.get("reason_code")
+    return reason if isinstance(reason, str) and reason else "PROTOCOL_REFUSED"
+
+
+def _typed_raw_type(run):
+    rows = run.get("runs")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        value = rows[0].get("raw_type")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _fixture_snippet(binding, replay_source):
+    from breakcheck.adapters.python.fixtures import render_fixture_source
+
+    try:
+        call = ast.parse(replay_source["expression"], mode="eval").body
+    except (SyntaxError, ValueError, TypeError) as exc:
+        raise ValueError("CALL_SITE_SOURCE_REFUSED") from exc
+    if not isinstance(call, ast.Call):
+        raise ValueError("CALL_SITE_SOURCE_REFUSED")
+    callable_source = ast.unparse(call.func)
+    return (
+        replay_source["import_statement"]
+        + "\n\n"
+        + render_fixture_source(binding, callable_source)
+    )
+
+
+def _invocation(args):
+    return {
+        "allow_empty": bool(getattr(args, "allow_empty", False)),
+        "ci": bool(getattr(args, "ci", False)),
+        "coverage_report": bool(getattr(args, "coverage_report", None)),
+        "fixture_file": getattr(args, "fixtures", None),
+        "fixture_policy": getattr(args, "fixture_policy", "forbid"),
+        "json": bool(getattr(args, "json", False)),
+        "min_coverage": float(getattr(args, "min_coverage", 80.0)),
+        "suggest_fixtures": bool(getattr(args, "suggest_fixtures", None)),
+    }
+
+
+def _artifact_invocation(args, repository, kind):
+    from breakcheck.schema import canonicalize_invocation
+
+    values = _invocation(args)
+    selected = {
+        "dependency_report": (
+            "allow_empty", "ci", "coverage_report", "fixture_policy", "json",
+            "min_coverage", "suggest_fixtures",
+        ),
+        "coverage_report": (
+            "allow_empty", "fixture_policy", "min_coverage", "suggest_fixtures",
+        ),
+    }[kind]
+    flags = {name: values[name] for name in selected}
+    fixture_path = getattr(args, "fixtures", None)
+    if fixture_path:
+        try:
+            relative = Path(fixture_path).resolve().relative_to(repository)
+        except ValueError as exc:
+            raise ValueError("FIXTURE_PATH_REFUSED") from exc
+        flags["fixture_file"] = relative.as_posix()
+    return canonicalize_invocation(kind, flags)
+
+
+def _schema_two_observation(observation, provenance):
+    return {
+        "kind": observation["kind"],
+        "payload": copy.deepcopy(observation["payload"]),
+        "exception_class": observation["exception_class"],
+        "provenance": list(provenance),
+    }
+
+
+def _schema_two_dependency_report(
+    legacy_report, terminal_records, args, repository
+):
+    from breakcheck.schema import (
+        artifact_digest,
+        make_artifact,
+        record_identity,
+    )
+
+    terminal_by_location = {
+        (row["api"], row["file"], row["line"], row["column"]): row
+        for row in terminal_records
+    }
+    findings = []
+    witnesses = []
+    for legacy in legacy_report["findings"]:
+        site = legacy["call_sites"][0]
+        terminal = terminal_by_location[
+            (legacy["api"], site["file"], site["line"], site["column"])
+        ]
+        provenance = terminal["provenance"]
+        replay = legacy["repro"]
+        projection_source = replay.get("projection")
+        projection = (
+            None
+            if projection_source is None
+            else {
+                "source": projection_source,
+                "sha256": artifact_digest(projection_source),
+            }
+        )
+        finding = {
+            "finding_id": "",
+            "candidate_id": terminal["candidate_id"],
+            "api": legacy["api"],
+            "call_sites": copy.deepcopy(legacy["call_sites"]),
+            "verdict": legacy["verdict"],
+            "old": (
+                None
+                if legacy["old"] is None
+                else _schema_two_observation(legacy["old"], provenance)
+            ),
+            "new": (
+                None
+                if legacy["new"] is None
+                else _schema_two_observation(legacy["new"], provenance)
+            ),
+            "reason_code": legacy["reason_code"],
+            "reason_detail": terminal.get("reason_detail"),
+            "comparison": (
+                None if legacy["verdict"] == "NOT_EXERCISED"
+                else copy.deepcopy(legacy["comparison"])
+            ),
+            "projection": projection,
+            "fixture_binding_sha256": replay.get("fixture_binding_sha256"),
+            "suggested_action": copy.deepcopy(legacy["suggested_action"]),
+        }
+        finding["finding_id"] = record_identity(finding, "finding_id")
+        findings.append(finding)
+        if finding["verdict"] != "NOT_EXERCISED":
+            old_digest = artifact_digest(finding["old"])
+            new_digest = artifact_digest(finding["new"])
+            witness = {
+                "witness_id": "",
+                "finding_id": finding["finding_id"],
+                "candidate_id": finding["candidate_id"],
+                "old_observation_sha256": old_digest,
+                "new_observation_sha256": new_digest,
+                "old_repeat_sha256": [old_digest, old_digest],
+                "new_repeat_sha256": [new_digest, new_digest],
+                "projection_sha256": (
+                    None if projection is None else projection["sha256"]
+                ),
+                "provenance": list(provenance),
+                "replay": {
+                    "source": replay["code"],
+                    "sha256": artifact_digest(replay["code"]),
+                },
+            }
+            witness["witness_id"] = record_identity(witness, "witness_id")
+            witnesses.append(witness)
+    findings.sort(key=lambda row: row["finding_id"])
+    witnesses.sort(key=lambda row: row["witness_id"])
+    summary = {
+        "changed": sum(row["verdict"] == "CHANGED" for row in findings),
+        "changed_under_projection": sum(
+            row["verdict"] == "CHANGED_UNDER_PROJECTION" for row in findings
+        ),
+        "identical": sum(row["verdict"] == "IDENTICAL" for row in findings),
+        "identical_under_projection": sum(
+            row["verdict"] == "IDENTICAL_UNDER_PROJECTION" for row in findings
+        ),
+        "not_exercised": sum(
+            row["verdict"] == "NOT_EXERCISED" for row in findings
+        ),
+    }
+    payload = {
+        "package": legacy_report["package"],
+        "current_version": legacy_report["current_version"],
+        "new_version": legacy_report["new_version"],
+        "coverage": copy.deepcopy(legacy_report["coverage"]),
+        "findings": findings,
+        "witnesses": witnesses,
+        "summary": summary,
+        "invocation": _artifact_invocation(args, repository, "dependency_report"),
+    }
+    return make_artifact("dependency_report", payload)
+
+
+def _schema_two_coverage_report(
+    package, current_version, new_version, terminal_records, args, repository
+):
+    from breakcheck.adapters.python.coverage import count_terminal_records
+    from breakcheck.schema import make_artifact
+
+    payload = {
+        "package": package,
+        "current_version": current_version,
+        "new_version": new_version,
+        "candidates": sorted(
+            copy.deepcopy(terminal_records), key=lambda row: row["candidate_id"]
+        ),
+        "counts": count_terminal_records(terminal_records),
+        "invocation": _artifact_invocation(args, repository, "coverage_report"),
+    }
+    return make_artifact("coverage_report", payload)
 
 def _presence_source(apis):
     return (
@@ -353,16 +700,81 @@ def _contextualize_comparison(comparison, expression, old, new):
         detail["policy"] = "fresh_process_per_observation"
     return result
 
+def _refuse_symlink_components(path):
+    absolute = Path(path).absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError("OUTPUT_PATH_REFUSED") from exc
+        if stat.S_ISLNK(mode):
+            raise ValueError("OUTPUT_PATH_REFUSED")
+
+
 def _write(path, text):
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".tmp")
-    temporary.write_text(text, encoding="utf-8", newline="\n")
-    temporary.replace(destination)
+    destination = Path(path).absolute()
+    _refuse_symlink_components(destination.parent)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError("OUTPUT_PATH_REFUSED") from exc
+    _refuse_symlink_components(destination.parent)
+    if destination.is_symlink():
+        raise ValueError("OUTPUT_PATH_REFUSED")
+    descriptor = None
+    temporary_name = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="." + destination.name + ".",
+            suffix=".tmp",
+            dir=destination.parent,
+        )
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            descriptor = None
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, destination)
+        temporary_name = None
+    except OSError as exc:
+        raise ValueError("OUTPUT_PATH_REFUSED") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _validate_output_paths(args):
+    selected = []
+    for name in ("output", "evidence", "coverage_report", "suggest_fixtures"):
+        value = getattr(args, name, None)
+        if value:
+            selected.append((name, Path(value).absolute().resolve(strict=False)))
+    resolved = [path for _name, path in selected]
+    if len(set(resolved)) != len(resolved):
+        raise ValueError("OUTPUT_PATH_COLLISION_REFUSED")
+    return tuple(selected)
 
 def _console_payload(report, rendered, max_bytes=1000000):
     if len(rendered.encode("utf-8")) <= max_bytes:
         return rendered
+    if report.get("schema_version") == 2:
+        payload = report["payload"]
+        return _canonical({
+            "artifact_kind": report["artifact_kind"],
+            "coverage": copy.deepcopy(payload.get("coverage")),
+            "findings": len(payload.get("findings", [])),
+            "summary": copy.deepcopy(payload.get("summary")),
+        })
     return _canonical({
         "coverage": copy.deepcopy(report["coverage"]),
         "findings": len(report["findings"]),
@@ -440,17 +852,26 @@ def _public_action_sites(call_sites):
     return projected
 
 def _build(args):
+    if args.runtime_root:
+        return _build_with_runtime(args, Path(args.runtime_root).resolve())
+    runtime_root = Path(tempfile.mkdtemp(prefix="breakcheck-runtime-")).resolve()
+    try:
+        return _build_with_runtime(args, runtime_root)
+    finally:
+        if runtime_root.is_symlink() or (runtime_root.exists() and not runtime_root.is_dir()):
+            runtime_root.unlink(missing_ok=True)
+        elif runtime_root.exists():
+            shutil.rmtree(runtime_root)
+
+
+def _build_with_runtime(args, runtime_root):
+    _validate_output_paths(args)
     if sys.platform not in _SUPPORTED_PLATFORMS:
         raise ValueError(_PLATFORM_REFUSAL_CODE)
     package, new_version = _target(args.target)
     wheelhouse = args.wheelhouse
-    if not wheelhouse:
+    if not wheelhouse and not getattr(args, "suggest_fixtures", None):
         raise ValueError(_WHEELHOUSE_REQUIRED_CODE)
-    try:
-        current_version = _metadata.version(package)
-    except Exception:
-        print(_MISSING_CURRENT, file=sys.stderr)
-        return 2
     global _inventory, _Scanner, _synthesize, _EnvironmentBuilder
     global _execute, _normalize, _compare, _finding_id
     global _render_json, _render_human, _exit_code, _verify_report
@@ -459,9 +880,6 @@ def _build(args):
      _exit_code, _verify_report) = _load_pipeline()
     import_root = _import_root(package)
     repository = Path.cwd().resolve()
-    runtime_root = Path(args.runtime_root).resolve() if args.runtime_root else Path(
-        tempfile.mkdtemp(prefix='breakcheck-runtime-')
-    ).resolve()
     excluded = {runtime_root}
     for value in (args.output, args.evidence):
         if value:
@@ -472,6 +890,13 @@ def _build(args):
     call_sites = scan.get("call_sites") if isinstance(scan, dict) else None
     if not isinstance(call_sites, list):
         raise ValueError("CALL_SITE_SCAN_REFUSED")
+    if getattr(args, "suggest_fixtures", None):
+        return _fixture_suggestions(args, repository, scan, inventory)
+    try:
+        current_version = _metadata.version(package)
+    except Exception:
+        print(_MISSING_CURRENT, file=sys.stderr)
+        return 2
     grouped = {}
     for row in call_sites:
         if not isinstance(row, dict) or set(row) != {"api", "file", "line", "column"}:
@@ -479,6 +904,18 @@ def _build(args):
         grouped.setdefault(row["api"], []).append(
             {"file": row["file"], "line": row["line"], "column": row["column"]}
         )
+    from breakcheck.adapters.python.fixtures import resolve_fixture_policy
+
+    fixture_file = resolve_fixture_policy(
+        getattr(args, "fixture_policy", "forbid"),
+        fixture_path=getattr(args, "fixtures", None),
+        repository_root=repository,
+        inventory=call_sites,
+    )
+    fixture_bindings = {
+        binding.key: binding for binding in (() if fixture_file is None else fixture_file.bindings)
+    }
+    from breakcheck.adapters.python.literals import LiteralRefusal
     
     try:
         pair = _EnvironmentBuilder(
@@ -495,18 +932,37 @@ def _build(args):
         raise ValueError("ENVIRONMENT_PAIR_REFUSED")
     findings = []
     witnesses = []
+    terminal_records = []
     exercised = 0
     call_sources = _call_sources(repository, grouped, inventory)
+    from breakcheck.adapters.python.coverage import (
+        count_terminal_records,
+        make_candidate,
+        terminal_record,
+    )
     for row in scan.get("unsupported", []):
         if not isinstance(row, dict) or row.get("reason_code") not in {
             "DYNAMIC_USAGE_UNSUPPORTED", "SOURCE_SYNTAX_REFUSED"
         }:
             raise ValueError("UNSUPPORTED_USAGE_SCHEMA_REFUSED")
+        sites = [{"file": row.get("file"), "line": row.get("line"),
+                  "column": row.get("column")}]
         findings.append(_not_exercised(
             str(row.get("api", "dynamic")),
-            [{"file": row.get("file"), "line": row.get("line"),
-              "column": row.get("column")}],
+            sites,
             row["reason_code"],
+        ))
+        candidate = make_candidate(
+            api=str(row.get("api", "dynamic")),
+            file=str(row.get("file")),
+            line=int(row.get("line")),
+            column=int(row.get("column")),
+        )
+        terminal_records.append(terminal_record(
+            candidate,
+            "G1_NOT_DISCOVERABLE",
+            reason_code=row["reason_code"],
+            provenance=("SOURCE_LITERAL",),
         ))
     prepared = []
     for api in sorted(grouped):
@@ -516,21 +972,37 @@ def _build(args):
         for site in internal_sites:
             sites = [{"file": site["file"], "line": site["line"],
                       "column": site["column"]}]
+            candidate = make_candidate(
+                api=api,
+                file=site["file"],
+                line=site["line"],
+                column=site["column"],
+            )
+            binding = fixture_bindings.get(
+                (site["file"], site["line"], site["column"], api)
+            )
             try:
                 replay_source = call_sources[
                     (site["file"], site["line"], site["column"])
                 ]
                 expression = replay_source["expression"]
-                snippet = _synthesize(
-                    expression, replay_source["import_statement"]
-                )
-            except Exception as exc:
-                reason = (
-                    "DYNAMIC_USAGE_UNSUPPORTED"
-                    if str(exc) == "DYNAMIC_USAGE_UNSUPPORTED"
-                    else "NONLITERAL_ARGS"
-                )
+                if binding is None:
+                    snippet, provenance = _synthesize_replay(replay_source)
+                    projection = None
+                else:
+                    snippet = _fixture_snippet(binding, replay_source)
+                    provenance = ("OPERATOR_FIXTURE",)
+                    projection = binding.projection
+            except LiteralRefusal as exc:
+                reason = "NONLITERAL_ARGS"
                 findings.append(_not_exercised(api, sites, reason))
+                terminal_records.append(terminal_record(
+                    candidate,
+                    "G2_NONLITERAL",
+                    reason_code=reason,
+                    reason_detail=getattr(exc, "reason_detail", "OTHER"),
+                    provenance=("SOURCE_LITERAL",),
+                ))
                 continue
             prepared.append({
                 "api": api,
@@ -538,6 +1010,12 @@ def _build(args):
                 "expression": expression,
                 "snippet": snippet,
                 "site": (site["file"], site["line"], site["column"]),
+                "candidate": candidate,
+                "provenance": provenance,
+                "projection": projection,
+                "fixture_binding_sha256": (
+                    None if binding is None else binding.binding_sha256
+                ),
             })
     prepared_apis = sorted({row["api"] for row in prepared})
     current_presence = _presence_census(
@@ -553,26 +1031,72 @@ def _build(args):
             findings.append(_not_exercised(
                 api, sites, "API_ABSENT_BOTH_ENVIRONMENTS"
             ))
+            terminal_records.append(terminal_record(
+                row["candidate"],
+                "G4_IMPURE",
+                reason_code="API_ABSENT_BOTH_ENVIRONMENTS",
+                environment="both",
+                provenance=row["provenance"],
+            ))
             continue
-        old = _process_observation(_execute(
-            snippet_source=snippet, environment=pair["current"]
-        ))
-        new = _process_observation(_execute(
-            snippet_source=snippet, environment=pair["new"]
-        ))
+        old_run = _repeat_observation(snippet, pair["current"])
+        new_run = _repeat_observation(snippet, pair["new"])
+        old_refusal = _typed_refusal(old_run)
+        new_refusal = _typed_refusal(new_run)
+        if old_refusal is not None or new_refusal is not None:
+            reason = (
+                old_refusal
+                if old_refusal is not None and old_refusal == new_refusal
+                else old_refusal or new_refusal or "ENVIRONMENT_PAIR_REFUSED"
+            )
+            findings.append(_not_exercised(api, sites, reason))
+            unnormalizable = (
+                old_run.get("status") == "UNNORMALIZABLE"
+                or new_run.get("status") == "UNNORMALIZABLE"
+            )
+            terminal_records.append(terminal_record(
+                row["candidate"],
+                "G3_UNNORMALIZABLE" if unnormalizable else "G4_IMPURE",
+                reason_code=reason,
+                raw_type=(
+                    _typed_raw_type(old_run) or _typed_raw_type(new_run)
+                    if unnormalizable else None
+                ),
+                environment=(
+                    "both" if old_refusal is not None and new_refusal is not None
+                    else "current" if old_refusal is not None else "new"
+                ),
+                provenance=row["provenance"],
+            ))
+            continue
+        old = old_run["observation"]
+        new = new_run["observation"]
         exercised += 1
         comparison = _contextualize_comparison(
             _compare(old, new), expression, old, new
         )
         verdict = comparison["verdict"]
-        actions = [] if verdict == "IDENTICAL" else [
+        if row["projection"] is not None:
+            verdict = (
+                "IDENTICAL_UNDER_PROJECTION"
+                if verdict == "IDENTICAL"
+                else "CHANGED_UNDER_PROJECTION"
+            )
+        actions = [] if verdict in {"IDENTICAL", "IDENTICAL_UNDER_PROJECTION"} else [
             {"kind": "pin", "argument": package + "==" + current_version},
             {"kind": "adapt", "argument": _public_action_sites(sites)},
         ]
         snippet_id = _digest({"api": api, "code": snippet, "call_sites": sites})
         repro = {"snippet_id": snippet_id, "api": api,
                  "call_sites": copy.deepcopy(sites), "code": snippet,
-                 "args_source": "literal", "reason_code": None}
+                 "args_source": (
+                     "fixture"
+                     if "OPERATOR_FIXTURE" in row["provenance"]
+                     else "source"
+                 ), "reason_code": None,
+                 "provenance": list(row["provenance"]),
+                 "projection": row["projection"],
+                 "fixture_binding_sha256": row["fixture_binding_sha256"]}
         finding = {"finding_id": "", "api": api,
                    "call_sites": copy.deepcopy(sites), "verdict": verdict,
                    "old": old, "new": new, "repro": repro,
@@ -588,33 +1112,64 @@ def _build(args):
         witness["witness_id"] = _digest(witness)
         findings.append(finding)
         witnesses.append(witness)
+        terminal_records.append(terminal_record(
+            row["candidate"],
+            "EXERCISED",
+            provenance=row["provenance"],
+        ))
     findings.sort(key=lambda row: row["finding_id"])
     witnesses.sort(key=lambda row: row["witness_id"])
-    changed = sum(row["verdict"] == "CHANGED" for row in findings)
-    identical = sum(row["verdict"] == "IDENTICAL" for row in findings)
+    changed = sum(row["verdict"] in {"CHANGED", "CHANGED_UNDER_PROJECTION"} for row in findings)
+    identical = sum(row["verdict"] in {"IDENTICAL", "IDENTICAL_UNDER_PROJECTION"} for row in findings)
     refused = sum(row["verdict"] == "NOT_EXERCISED" for row in findings)
     total = len(findings)
-    report = {"schema_version": 1, "package": package,
+    legacy_report = {"schema_version": 1, "package": package,
               "current_version": current_version, "new_version": new_version,
               "coverage": {"exercised": exercised, "total": total,
                            "percent": (100.0 * exercised / total) if total else 0.0},
               "findings": findings, "witnesses": witnesses,
               "summary": {"changed": changed, "identical": identical,
-                          "not_exercised": refused}}
+                          "not_exercised": refused},
+              "invocation": _invocation(args)}
+    report = _schema_two_dependency_report(
+        legacy_report, terminal_records, args, repository
+    )
     rendered = _render_json(report)
-    evidence = {"report": report, "report_sha256": _digest(report),
-                "witnesses": witnesses,
-                "environment_artifacts": {
-                    "current": _artifact_digest(pair["current"]),
-                    "new": _artifact_digest(pair["new"]),
-                }}
-    evidence["witness_sha256"] = _digest(evidence)
+    from breakcheck.schema import artifact_digest, make_artifact
+
+    environment_artifacts = [
+        {"name": name, "sha256": _artifact_digest(pair[name])["sha256"]}
+        for name in ("current", "new")
+    ]
+    evidence = make_artifact(
+        "evidence",
+        {
+            "report_artifact_sha256": artifact_digest(report),
+            "report_payload_sha256": report["payload_sha256"],
+            "report_kind": report["artifact_kind"],
+            "witnesses": copy.deepcopy(report["payload"]["witnesses"]),
+            "environment_artifacts": environment_artifacts,
+            "invocation": copy.deepcopy(report["payload"]["invocation"]),
+        },
+    )
     if args.output:
         _write(args.output, rendered + "\n")
     if args.evidence:
-        _write(args.evidence, _canonical(evidence) + "\n")
+        _write(args.evidence, _render_json(evidence) + "\n")
+    if getattr(args, "coverage_report", None):
+        coverage = _schema_two_coverage_report(
+            package, current_version, new_version, terminal_records, args, repository
+        )
+        _write(args.coverage_report, _render_json(coverage) + "\n")
     print(_console_payload(report, rendered) if args.json else _render_human(report))
-    return _exit_code(report) if args.ci else 0
+    percent = report["payload"]["coverage"]["percent"]
+    if exercised == 0 and not getattr(args, "allow_empty", False):
+        return 4
+    if args.ci and percent < float(getattr(args, "min_coverage", 80.0)):
+        return 4
+    if args.ci:
+        return 3 if changed else 0
+    return 0
 
 def _verify(args):
     try:
@@ -623,6 +1178,9 @@ def _verify(args):
         evidence_path = args.evidence or str(Path(args.verify).with_suffix(".witnesses.json"))
         witness = json.loads(Path(evidence_path).read_text(encoding="utf-8"))
         verify_report(report, witness)
+        if report.get("schema_version") == 2:
+            print("VERIFIED")
+            return 0
         if witness.get("witnesses") != report.get("witnesses"):
             raise ValueError("witness rows mismatch")
         artifacts = witness.get("environment_artifacts")
@@ -648,12 +1206,281 @@ def _verify(args):
     print("VERIFIED")
     return 0
 
+
+def _capabilities():
+    return {
+        "schema_version": 2,
+        "python": ["3.10", "3.11", "3.12", "3.13"],
+        "platforms": ["linux", "macos"],
+        "report_schemas": [1, 2],
+        "features": [
+            "claim_attestation",
+            "dependency_comparison",
+            "fixture_suggestions",
+            "revision_baselines",
+            "revision_comparison",
+        ],
+        "interactive": False,
+        "runtime_dependencies": [],
+    }
+
+
+def _demo(output_root):
+    from breakcheck.demo import run_demo
+
+    return run_demo(output_root, _build)
+
+
+def _present_long_options(arguments):
+    return {
+        argument.split("=", 1)[0]
+        for argument in arguments
+        if argument.startswith("--")
+    }
+
+
+def _require_mode_options(parser, arguments, *, mode, allowed):
+    unexpected = sorted(_present_long_options(arguments) - set(allowed))
+    if unexpected:
+        parser.error(
+            mode + " mode does not accept: " + ", ".join(unexpected)
+        )
+
+
+def _revision_runtime_root(requested):
+    if requested:
+        return Path(requested).resolve(), None
+    temporary_parent = Path(tempfile.mkdtemp(prefix="breakcheck-revision-"))
+    return temporary_parent / "worktrees", temporary_parent
+
+
+def _load_json_artifact(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("ARTIFACT_INPUT_REFUSED") from exc
+
+
+def _emit_revision_result(result, args):
+    from breakcheck.report import render_human
+    from breakcheck.schema import canonical_json
+
+    rendered_report = canonical_json(result.report)
+    if args.output:
+        _write(args.output, rendered_report + "\n")
+    if args.evidence:
+        _write(args.evidence, canonical_json(result.evidence) + "\n")
+    print(rendered_report if args.json else render_human(result.report))
+    return result.exit_code
+
+
+def _revision_parser(command):
+    parser = argparse.ArgumentParser(
+        prog="breakcheck " + command,
+        description={
+            "freeze": "capture a deterministic behavioral baseline for fixture-bound symbols",
+            "diff": "compare fixture-bound behavior across two Git revisions",
+            "attest": "adjudicate a behavior-preservation claim against an independent revision comparison",
+        }[command],
+    )
+    parser.add_argument(
+        "--fixtures",
+        default="breakcheck.fixtures.toml",
+        help="repository-relative fixture file (default: breakcheck.fixtures.toml)",
+    )
+    parser.add_argument(
+        "--runtime-root",
+        help="absent path used for detached worktrees; a temporary path is used by default",
+    )
+    parser.add_argument(
+        "--output",
+        required=command == "freeze",
+        help="write the canonical report artifact to this path",
+    )
+    parser.add_argument(
+        "--evidence", help="write the matching evidence artifact to this path"
+    )
+    parser.add_argument("--json", action="store_true", help="print canonical JSON")
+    if command == "freeze":
+        parser.add_argument(
+            "--revision", default="HEAD", help="Git revision to capture (default: HEAD)"
+        )
+        parser.add_argument(
+            "--target",
+            action="append",
+            default=[],
+            help="module.path:symbol target; repeat for multiple targets",
+        )
+        parser.add_argument(
+            "--allow-dirty",
+            action="store_true",
+            help="request dirty-tree capture; currently refused rather than silently omitting changes",
+        )
+    elif command == "diff":
+        base = parser.add_mutually_exclusive_group(required=True)
+        base.add_argument("--base", help="baseline Git revision")
+        base.add_argument("--baseline", help="baseline artifact created by freeze")
+        parser.add_argument("--head", required=True, help="head Git revision")
+        parser.add_argument(
+            "--previous-report",
+            help="verified earlier revision report used to disclose fixture retuning",
+        )
+        parser.add_argument(
+            "--target",
+            action="append",
+            default=[],
+            help="module.path:symbol target; repeat for multiple targets",
+        )
+        parser.add_argument(
+            "--fixture-source",
+            choices=("base", "head", "explicit"),
+            default="base",
+            help="revision that owns fixture provenance (default: base)",
+        )
+        parser.add_argument(
+            "--allow-empty",
+            action="store_true",
+            help="permit a comparison with no selected targets and record that choice",
+        )
+        parser.add_argument(
+            "--min-coverage",
+            type=float,
+            default=80.0,
+            help="minimum exercised target percentage (default: 80)",
+        )
+        parser.add_argument(
+            "--strict-separation",
+            action="store_true",
+            help="require fixtures to predate the head revision",
+        )
+    else:
+        parser.add_argument("--head", required=True, help="head Git revision")
+        parser.add_argument(
+            "--claim", required=True, help="repository-relative behavior claim file"
+        )
+        parser.add_argument(
+            "--previous-report",
+            help="verified earlier revision report used to disclose fixture retuning",
+        )
+        parser.add_argument(
+            "--fixture-source",
+            choices=("base", "head", "explicit"),
+            default="base",
+            help="revision that owns fixture provenance (default: base)",
+        )
+        parser.add_argument(
+            "--allow-empty",
+            action="store_true",
+            help="permit an empty target set and record that choice",
+        )
+        parser.add_argument(
+            "--min-coverage",
+            type=float,
+            default=80.0,
+            help="minimum exercised target percentage (default: 80)",
+        )
+        parser.add_argument(
+            "--strict",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="fail when any claim is unverifiable (default: enabled)",
+        )
+        parser.add_argument(
+            "--strict-separation",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="require fixtures to predate the head revision (default: enabled)",
+        )
+    return parser
+
+
+def _revision_command(command, argv):
+    from breakcheck.revision_cli import (
+        RevisionModeRefusal,
+        attest_revision,
+        diff_revisions,
+        freeze_revision,
+    )
+
+    parser = _revision_parser(command)
+    args = parser.parse_args(argv)
+    _validate_output_paths(args)
+    runtime_root, temporary_parent = _revision_runtime_root(args.runtime_root)
+    try:
+        if command == "freeze":
+            result = freeze_revision(
+                Path.cwd(),
+                revision=args.revision,
+                fixture_path=args.fixtures,
+                runtime_root=runtime_root,
+                targets=args.target,
+                allow_dirty=args.allow_dirty,
+            )
+        elif command == "diff":
+            result = diff_revisions(
+                Path.cwd(),
+                base_revision=args.base,
+                baseline=(
+                    None if args.baseline is None else _load_json_artifact(args.baseline)
+                ),
+                previous_report=(
+                    None
+                    if args.previous_report is None
+                    else _load_json_artifact(args.previous_report)
+                ),
+                head_revision=args.head,
+                fixture_path=args.fixtures,
+                runtime_root=runtime_root,
+                targets=args.target,
+                fixture_source=args.fixture_source,
+                allow_empty=args.allow_empty,
+                min_coverage=args.min_coverage,
+                strict_separation=args.strict_separation,
+            )
+        else:
+            result = attest_revision(
+                Path.cwd(),
+                head_revision=args.head,
+                claim_path=args.claim,
+                previous_report=(
+                    None
+                    if args.previous_report is None
+                    else _load_json_artifact(args.previous_report)
+                ),
+                fixture_path=args.fixtures,
+                runtime_root=runtime_root,
+                fixture_source=args.fixture_source,
+                allow_empty=args.allow_empty,
+                min_coverage=args.min_coverage,
+                strict=args.strict,
+                strict_separation=args.strict_separation,
+            )
+        return _emit_revision_result(result, args)
+    except RevisionModeRefusal as exc:
+        print("REVISION_REFUSED:" + exc.code, file=sys.stderr)
+        return 2
+    except ValueError:
+        print("REVISION_REFUSED:ARTIFACT_INPUT_REFUSED", file=sys.stderr)
+        return 2
+    finally:
+        if temporary_parent is not None:
+            try:
+                temporary_parent.rmdir()
+            except OSError:
+                pass
+
 def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] in {"freeze", "diff", "attest"}:
+        return _revision_command(arguments[0], arguments[1:])
     parser = argparse.ArgumentParser(
         prog='breakcheck',
         usage='breakcheck <package>@<new-version> [options]',
-        description=('behavioral upgrade analysis via sandboxed replay.' +
-            " Isolation is best-effort and not a security sandbox."),
+        description=(
+            "deterministic behavioral comparison for Python dependency upgrades "
+            "and source revisions. Isolation is best-effort and is not a "
+            "security sandbox."
+        ),
         epilog=_HELP,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -668,11 +1495,58 @@ def main(argv=None):
     parser.add_argument('--output')
     parser.add_argument('--evidence')
     parser.add_argument('--runtime-root')
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        '--capabilities', action="store_true", help="print the machine-readable capability contract"
+    )
+    parser.add_argument('--output-root', help="absent directory for demonstration artifacts")
+    parser.add_argument('--coverage-report', help="write call-site coverage diagnostics")
+    parser.add_argument('--fixtures', help="load operator-reviewed fixture bindings")
+    parser.add_argument(
+        '--fixture-policy', choices=("forbid", "allow", "require"), default="forbid"
+    )
+    parser.add_argument('--suggest-fixtures', help="write fixture suggestions for unexercised calls")
+    parser.add_argument(
+        '--min-coverage', type=float, default=80.0, help="minimum exercised percentage (default: 80)"
+    )
+    parser.add_argument(
+        '--allow-empty', action="store_true", help="permit an empty comparison and record that choice"
+    )
+    args = parser.parse_args(arguments)
+    if args.capabilities:
+        if args.target:
+            parser.error("capabilities mode is exclusive")
+        _require_mode_options(
+            parser,
+            arguments,
+            mode="capabilities",
+            allowed=("--capabilities", "--json"),
+        )
+        print(_canonical(_capabilities()))
+        return 0
+    if args.target == "demo":
+        if not args.output_root:
+            parser.error("demo requires --output-root")
+        _require_mode_options(
+            parser,
+            arguments,
+            mode="demo",
+            allowed=("--output-root",),
+        )
+        return _demo(args.output_root)
     if args.verify:
-        if args.target: parser.error("verify mode is exclusive")
+        if args.target:
+            parser.error("verify mode is exclusive")
+        _require_mode_options(
+            parser,
+            arguments,
+            mode="verify",
+            allowed=("--verify", "--evidence"),
+        )
         return _verify(args)
-    if not args.target: parser.error("target is required")
+    if not args.target:
+        parser.error("target is required")
+    if args.output_root:
+        parser.error("--output-root is only valid in demo mode")
     try:
         return _build(args)
     except Exception as exc:

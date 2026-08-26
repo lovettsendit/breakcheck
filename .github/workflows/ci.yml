@@ -1,7 +1,8 @@
-name: ci
+name: Breakcheck CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -9,7 +10,9 @@ permissions:
 
 jobs:
   test:
+    name: test (${{ matrix.os }}, ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -57,3 +60,24 @@ jobs:
       - name: Check CLI help
         working-directory: ${{ runner.temp }}
         run: "$RUNNER_TEMP/breakcheck-wheel/bin/breakcheck --help"
+
+  acceptance:
+    name: demo and CLI acceptance
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - name: Install the public package
+        run: python -m pip install --no-deps .
+      - name: Check machine-readable capabilities
+        working-directory: ${{ runner.temp }}
+        run: breakcheck --capabilities --json
+      - name: Run the offline changed-behavior demo
+        working-directory: ${{ runner.temp }}
+        run: breakcheck demo --output-root "$RUNNER_TEMP/breakcheck-demo"

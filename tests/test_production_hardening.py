@@ -198,9 +198,11 @@ def _fake_build(monkeypatch, tmp_path, *, present):
         evidence=None,
         json=True,
         ci=False,
+        allow_empty=True,
     )
     assert cli._build(args) == 0
-    return captured["report"]
+    observed = captured["report"]
+    return observed.get("payload", observed)
 
 
 def test_present_api_remains_exercised(monkeypatch, tmp_path):
@@ -310,46 +312,16 @@ def test_build_backend_policy_does_not_exclude_newer_compatible_tools():
     assert requirements == ["setuptools>=77", "wheel>=0.43"]
 
 
-def test_public_release_roots_exclude_private_identity_and_internal_provenance():
+def test_public_release_roots_pass_the_generic_artifact_scan():
     project_root = Path(__file__).resolve().parents[1]
-    private_term_fingerprints = {
-        3: {"8b850164b5a2e503567a6779b9a31a4f9bf202fb3f5d1327c789cdc948ebb794"},
-        6: {
-            "147e78b1e6476d75bf35a0b85796f18369fb025928d6963a8eeeefb6c8330e64",
-            "6a487b4fd1d59b9a6d73b542978c4d03778842385b603085f2d4880476509bf3",
-            "b6f4bf975b93ad705f194752a5119dfeb93d1c8a20cf3c3aeff372fcf94d4e71",
-        },
-        7: {"3e44fb009899c0f900c1e74cd803b171d70a5d799d2cc933898d78e8d5fc17ca"},
-        9: {"6592078a7321c458cd4586c3945ef79b7fd3b13947eba1faa78568364918178d"},
-        11: {
-            "06ae6b52ed986ed5349967715ae18b67f83e52e67984ab7e0b2b5404a7ef8cf2",
-            "a3626979818075a734058bdf0847410e2bf597ce85eac770ae2dd6285fe1bc62",
-        },
-    }
-    paths = sorted(
-        path
-        for path in project_root.rglob("*")
-        if path.is_file()
-        and path.resolve() != Path(__file__).resolve()
-        and not path.name.startswith("._")
-        and not {".benchmarks", ".pytest_cache", "__pycache__"}.intersection(path.parts)
-        and path.suffix.lower() in {".in", ".md", ".py", ".toml", ".yml"}
+    result = subprocess.run(
+        ["sh", str(project_root / "scripts" / "scan_artifacts.sh"), str(project_root)],
+        cwd=project_root,
+        text=True,
+        capture_output=True,
+        check=False,
     )
-    matches = []
-    for path in paths:
-        text = path.read_text(encoding="utf-8").lower()
-        if re.search(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", text):
-            matches.append(path.relative_to(project_root).as_posix())
-            continue
-        for length, forbidden in private_term_fingerprints.items():
-            if any(
-                hashlib.sha256(text[index : index + length].encode("utf-8")).hexdigest()
-                in forbidden
-                for index in range(max(0, len(text) - length + 1))
-            ):
-                matches.append(path.relative_to(project_root).as_posix())
-                break
-    assert matches == []
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_public_documentation_explains_practical_and_ai_assisted_use():

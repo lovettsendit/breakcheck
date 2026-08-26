@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
+from .normalization import tagged_value_kind, tagged_value_payload
+
 
 class PythonEqualityRules:
     def __init__(self, rtol=1e-09, atol=0):
@@ -37,6 +39,12 @@ def _field(value, name):
 
 
 def _summary(value):
+    tagged_kind = tagged_value_kind(value)
+    if tagged_kind is not None:
+        payload = tagged_value_payload(value)
+        if tagged_kind == "bytes":
+            return "bytes:" + str(payload)
+        return tagged_kind + ":" + str(_stable_key(payload))[:180]
     if value is None:
         return "NoneType:None"
     if type(value) is bool:
@@ -59,6 +67,22 @@ def _summary(value):
 
 
 def _stable_key(value):
+    tagged_kind = tagged_value_kind(value)
+    if tagged_kind is not None:
+        payload = tagged_value_payload(value)
+        if tagged_kind == "bytes":
+            return ("bytes", payload)
+        if tagged_kind in {"set", "frozenset"}:
+            return (
+                tagged_kind,
+                tuple(sorted(_stable_key(item) for item in payload)),
+            )
+        if tagged_kind == "mapping":
+            return (
+                "mapping",
+                tuple((key, _stable_key(item)) for key, item in payload),
+            )
+        return (tagged_kind, tuple(_stable_key(item) for item in payload))
     if value is None:
         return ("none",)
     if type(value) is bool:
@@ -111,6 +135,9 @@ def _result(verdict, reason, path, old_summary, new_summary, policy):
 
 
 def _kind(value):
+    tagged_kind = tagged_value_kind(value)
+    if tagged_kind is not None:
+        return tagged_kind
     if type(value) is bool:
         return "bool"
     if type(value) is int:
@@ -140,9 +167,15 @@ def _compare_values(left, right, path, rules):
         equal = float_eq(left, right, rules)
         return equal, "EQUAL" if equal else "FLOAT_MISMATCH", path, left, right, _FLOAT_POLICY
     if left_kind in {"bool", "int", "str", "bytes", "NoneType"}:
+        if left_kind == "bytes" and tagged_value_kind(left) == "bytes":
+            left = tagged_value_payload(left)
+            right = tagged_value_payload(right)
         equal = left == right
         return equal, "EQUAL" if equal else "VALUE_MISMATCH", path, left, right, "canonical_json_strict"
     if left_kind == "mapping":
+        if tagged_value_kind(left) == "mapping":
+            left = dict(tagged_value_payload(left))
+            right = dict(tagged_value_payload(right))
         left_keys = set(left)
         right_keys = set(right)
         for key in sorted(left_keys | right_keys):
@@ -165,10 +198,42 @@ def _compare_values(left, right, path, rules):
                 return False, reason, mismatch, old, new, "sequence_order_significant"
         return True, "EQUAL", path, left, right, "sequence_order_significant"
     if left_kind == "set":
-        left_values = sorted(_stable_key(item) for item in left)
-        right_values = sorted(_stable_key(item) for item in right)
+        left_items = (
+            tagged_value_payload(left)
+            if tagged_value_kind(left) == "set"
+            else left
+        )
+        right_items = (
+            tagged_value_payload(right)
+            if tagged_value_kind(right) == "set"
+            else right
+        )
+        left_values = sorted(_stable_key(item) for item in left_items)
+        right_values = sorted(_stable_key(item) for item in right_items)
         equal = left_values == right_values
         return equal, "EQUAL" if equal else "VALUE_MISMATCH", path, left, right, "unordered_set_canonical"
+    if left_kind == "frozenset":
+        left_values = sorted(
+            _stable_key(item) for item in tagged_value_payload(left)
+        )
+        right_values = sorted(
+            _stable_key(item) for item in tagged_value_payload(right)
+        )
+        equal = left_values == right_values
+        return equal, "EQUAL" if equal else "VALUE_MISMATCH", path, left, right, "unordered_frozenset_canonical"
+    if left_kind == "tuple":
+        left_values = tagged_value_payload(left)
+        right_values = tagged_value_payload(right)
+        if len(left_values) != len(right_values):
+            return False, "LENGTH_MISMATCH", path, left, right, "tuple_length_exact"
+        for index, (left_item, right_item) in enumerate(zip(left_values, right_values)):
+            child = _pointer(path, index)
+            equal, reason, mismatch, old, new, _policy = _compare_values(
+                left_item, right_item, child, rules
+            )
+            if not equal:
+                return False, reason, mismatch, old, new, "tuple_order_significant"
+        return True, "EQUAL", path, left, right, "tuple_order_significant"
     equal = left == right
     return equal, "EQUAL" if equal else "VALUE_MISMATCH", path, left, right, "canonical_json_strict"
 

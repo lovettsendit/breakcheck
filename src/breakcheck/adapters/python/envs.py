@@ -192,8 +192,8 @@ def env_fingerprint(*, environment=None):
             for distribution in importlib.metadata.distributions(path=sorted(paths)):
                 rows.append((str(distribution.metadata.get("Name", "")),
                              str(distribution.version)))
-        except Exception:
-            rows = []
+        except Exception as exc:
+            raise ValueError("ENVIRONMENT_FINGERPRINT_REFUSED") from exc
     rows = sorted(rows)
     payload = "\n".join("%s==%s" % row for row in rows).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()

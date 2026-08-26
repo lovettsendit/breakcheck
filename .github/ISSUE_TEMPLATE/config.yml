@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security advisory
+    url: https://github.com/lovettsendit/breakcheck/security/advisories/new
+    about: Report security vulnerabilities privately.
+  - name: Read the README
+    url: https://github.com/lovettsendit/breakcheck#readme
+    about: Review scope, limitations, and usage before opening an issue.

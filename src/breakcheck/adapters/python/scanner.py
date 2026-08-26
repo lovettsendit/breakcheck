@@ -1,5 +1,168 @@
 import ast
+import math
+from dataclasses import dataclass
 from pathlib import Path
+
+from .coverage import make_candidate
+from .literals import LiftedLiteral, LiteralRefusal, lift_with_provenance
+
+
+@dataclass(frozen=True)
+class StaticContext:
+    module_constants: dict[str, LiftedLiteral]
+    imported_names: frozenset[str]
+
+
+def _is_deeply_immutable(value):
+    if type(value) in (type(None), bool, int, str, bytes):
+        return True
+    if type(value) is float:
+        return math.isfinite(value)
+    if type(value) is tuple:
+        return all(_is_deeply_immutable(item) for item in value)
+    return False
+
+
+class _BindingInventory(ast.NodeVisitor):
+    def __init__(self):
+        self.bindings = {}
+        self.parameters = set()
+        self.declarations = set()
+
+    def _bind(self, name):
+        if isinstance(name, str) and name:
+            self.bindings[name] = self.bindings.get(name, 0) + 1
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self._bind(node.id)
+        self.generic_visit(node)
+
+    def _visit_arguments(self, arguments):
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        ):
+            self.parameters.add(argument.arg)
+        if arguments.vararg is not None:
+            self.parameters.add(arguments.vararg.arg)
+        if arguments.kwarg is not None:
+            self.parameters.add(arguments.kwarg.arg)
+
+    def visit_FunctionDef(self, node):
+        self._bind(node.name)
+        self._visit_arguments(node.args)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node):
+        self.visit_FunctionDef(node)
+
+    def visit_Lambda(self, node):
+        self._visit_arguments(node.args)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node):
+        self._bind(node.name)
+        self.generic_visit(node)
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self._bind(alias.asname or alias.name.split(".", 1)[0])
+
+    def visit_ImportFrom(self, node):
+        for alias in node.names:
+            if alias.name != "*":
+                self._bind(alias.asname or alias.name)
+
+    def visit_ExceptHandler(self, node):
+        self._bind(node.name)
+        self.generic_visit(node)
+
+    def visit_Global(self, node):
+        self.declarations.update(node.names)
+
+    def visit_Nonlocal(self, node):
+        self.declarations.update(node.names)
+
+    def visit_MatchAs(self, node):
+        self._bind(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node):
+        self._bind(node.name)
+
+    def visit_MatchMapping(self, node):
+        self._bind(node.rest)
+        self.generic_visit(node)
+
+
+def _imported_names(tree):
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    names.add(alias.asname or alias.name)
+    return frozenset(names)
+
+
+def build_static_context(source):
+    if isinstance(source, str):
+        tree = ast.parse(source)
+    elif isinstance(source, ast.Module):
+        tree = source
+    else:
+        raise ValueError("STATIC_CONTEXT_SOURCE_REFUSED")
+    imported_names = _imported_names(tree)
+    if any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "globals"
+        for node in ast.walk(tree)
+    ):
+        return StaticContext({}, imported_names)
+    inventory = _BindingInventory()
+    inventory.visit(tree)
+    candidates = {}
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and node.col_offset == 0
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            candidates[node.targets[0].id] = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and node.col_offset == 0
+            and isinstance(node.target, ast.Name)
+        ):
+            if node.value is not None:
+                candidates[node.target.id] = node.value
+    constants = {}
+    for name in sorted(candidates):
+        if (
+            inventory.bindings.get(name) != 1
+            or name in inventory.parameters
+            or name in inventory.declarations
+            or name in imported_names
+        ):
+            continue
+        try:
+            lifted = lift_with_provenance(candidates[name])
+        except LiteralRefusal:
+            continue
+        if _is_deeply_immutable(lifted.value):
+            constants[name] = lifted
+    return StaticContext(constants, imported_names)
+
+
+def build_module_constant_table(source):
+    return build_static_context(source).module_constants
 
 
 def _syntax_refusal(path, exc):
@@ -17,6 +180,12 @@ class PythonUsageScanner:
         if package_name is not None and (not isinstance(package_name, str) or not package_name):
             raise ValueError("PACKAGE_NAME_REFUSED")
         self.package_name = package_name
+
+    @staticmethod
+    def build_static_context(source_text):
+        """Return explicit, AST-only resolution context without changing scan rows."""
+
+        return build_static_context(source_text)
 
     def _rooted(self, value):
         return value == self.package_name or value.startswith(self.package_name + ".")
@@ -64,20 +233,24 @@ class PythonUsageScanner:
         tree = ast.parse(text, filename=name)
         bindings, _ = scanner._imports(tree, name)
         rebound_at = {}
+
+        def record_rebinding(local_name, node):
+            if local_name in bindings:
+                rebound_at[local_name] = min(
+                    rebound_at.get(local_name, node.lineno), node.lineno
+                )
+
         for node in ast.walk(tree):
-            targets = []
-            if isinstance(node, ast.Assign):
-                targets = list(node.targets)
-            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
-                targets = [node.target]
-            elif isinstance(node, (ast.For, ast.AsyncFor)):
-                targets = [node.target]
-            for target in targets:
-                for child in ast.walk(target):
-                    if isinstance(child, ast.Name) and child.id in bindings:
-                        rebound_at[child.id] = min(
-                            rebound_at.get(child.id, node.lineno), node.lineno
-                        )
+            if isinstance(node, ast.Name) and isinstance(
+                node.ctx, (ast.Store, ast.Del)
+            ):
+                record_rebinding(node.id, node)
+            elif isinstance(node, ast.arg):
+                record_rebinding(node.arg, node)
+            elif isinstance(node, ast.ExceptHandler):
+                record_rebinding(node.name, node)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                record_rebinding(node.name, node)
         rows = []
         unsupported = []
         for node in ast.walk(tree):
@@ -138,6 +311,31 @@ class PythonUsageScanner:
         scanner._last_unsupported = unsupported
         return rows
 
+    @staticmethod
+    def _candidates(call_sites, unsupported):
+        rows = []
+        for row in call_sites:
+            rows.append({**make_candidate(
+                api=row["api"],
+                file=row["file"],
+                line=row["line"],
+                column=row["column"],
+            ), "reason_code": None})
+        for row in unsupported:
+            if row.get("reason_code") == "SOURCE_SYNTAX_REFUSED":
+                continue
+            rows.append({**make_candidate(
+                api=row["api"],
+                file=row["file"],
+                line=row["line"],
+                column=row["column"],
+            ), "reason_code": row["reason_code"]})
+        rows.sort(key=lambda row: (
+            row["file"], row["line"], row["column"], row["api"],
+            row["candidate_id"],
+        ))
+        return rows
+
     def scan(self, repository=None, package_name=None, *, source=None, path=None, package=None, repo=None):
         selected_package = package or package_name or self.package_name
         if source is not None:
@@ -149,6 +347,7 @@ class PythonUsageScanner:
                     "imports": [],
                     "call_sites": [],
                     "unsupported": [_syntax_refusal(selected_path, exc)],
+                    "candidates": [],
                 }
             scanner = self if selected_package == self.package_name else type(self)(selected_package)
             result = {
@@ -156,6 +355,9 @@ class PythonUsageScanner:
                 "call_sites": scanner.extract_call_sites(source=source, path=selected_path, package=selected_package),
             }
             result["unsupported"] = list(getattr(scanner, "_last_unsupported", ()))
+            result["candidates"] = scanner._candidates(
+                result["call_sites"], result["unsupported"]
+            )
             return result
         root = Path(repository if repository is not None else repo).resolve()
         package = selected_package
@@ -181,7 +383,12 @@ class PythonUsageScanner:
         imports.sort(key=lambda row: (row["line"], row["file"], row["module"], row["alias"]))
         calls.sort(key=lambda row: (row["line"], row["column"], row["file"], row["api"]))
         unsupported.sort(key=lambda row: (row["line"], row["column"], row["file"], row["api"]))
-        return {"imports": imports, "call_sites": calls, "unsupported": unsupported}
+        return {
+            "imports": imports,
+            "call_sites": calls,
+            "unsupported": unsupported,
+            "candidates": scanner._candidates(calls, unsupported),
+        }
 
 
 def _first(*values):

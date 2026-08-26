@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import copy
 import json
+from typing import Mapping
 
 _SPECS = [{'allow_unknown': False, 'class_name': 'ReplaySnippet', 'closed_mapping_fields': {}, 'conditional_list_rules': [], 'constant_fields': {}, 'enum_fields': {'args_source': ['literal', 'refused']}, 'fields': [{'default_kind': 'required', 'name': 'snippet_id'}, {'default_kind': 'required', 'name': 'api'}, {'default_kind': 'required', 'name': 'call_sites'}, {'default_kind': 'required', 'name': 'code'}, {'default_kind': 'required', 'name': 'args_source'}, {'default_kind': 'none', 'name': 'reason_code'}], 'ordered_mapping_list_fields': {'call_sites': {'required_fields': ['file', 'line']}}, 'sort_fields': [], 'sort_list_fields': {}}, {'allow_unknown': False, 'class_name': 'Observation', 'closed_mapping_fields': {}, 'conditional_list_rules': [], 'constant_fields': {}, 'enum_fields': {'kind': ['value', 'exception', 'timeout']}, 'fields': [{'default_kind': 'required', 'name': 'kind'}, {'default_kind': 'required', 'name': 'payload'}, {'default_kind': 'none', 'name': 'exception_class'}, {'default_kind': 'none', 'name': 'duration_ms'}], 'ordered_mapping_list_fields': {}, 'sort_fields': [], 'sort_list_fields': {}}, {'allow_unknown': False, 'class_name': 'Comparison', 'closed_mapping_fields': {'detail': {'enum_fields': {'reason_code': ['EQUAL', 'KIND_MISMATCH', 'EXCEPTION_CLASS', 'VALUE_MISMATCH', 'FLOAT_MISMATCH', 'MISSING_KEY', 'LENGTH_MISMATCH']}, 'json_pointer_fields': ['path'], 'nullable_fields': ['path'], 'required_fields': ['reason_code', 'path', 'old_summary', 'new_summary', 'policy']}}, 'conditional_list_rules': [], 'constant_fields': {}, 'enum_fields': {'verdict': ['IDENTICAL', 'CHANGED']}, 'fields': [{'default_kind': 'required', 'name': 'verdict'}, {'default_kind': 'required', 'name': 'detail'}], 'ordered_mapping_list_fields': {}, 'sort_fields': [], 'sort_list_fields': {}}, {'allow_unknown': False, 'class_name': 'Finding', 'closed_mapping_fields': {}, 'conditional_list_rules': [{'cases': {'CHANGED': {'max_items': 2, 'min_items': 1}, 'IDENTICAL': {'max_items': 0, 'min_items': 0}, 'NOT_EXERCISED': {'max_items': 1, 'min_items': 1}}, 'discriminator_field': 'verdict', 'field': 'suggested_action'}], 'constant_fields': {}, 'enum_fields': {'verdict': ['IDENTICAL', 'CHANGED', 'NOT_EXERCISED']}, 'fields': [{'default_kind': 'required', 'name': 'finding_id'}, {'default_kind': 'required', 'name': 'api'}, {'default_kind': 'required', 'name': 'call_sites'}, {'default_kind': 'required', 'name': 'verdict'}, {'default_kind': 'none', 'name': 'old'}, {'default_kind': 'none', 'name': 'new'}, {'default_kind': 'required', 'name': 'repro'}, {'default_kind': 'required', 'name': 'suggested_action'}, {'default_kind': 'none', 'name': 'reason_code'}, {'default_kind': 'required', 'name': 'comparison'}], 'ordered_mapping_list_fields': {'call_sites': {'required_fields': ['file', 'line']}, 'suggested_action': {'required_fields': ['kind', 'argument']}}, 'sort_fields': [], 'sort_list_fields': {}}, {'allow_unknown': False, 'class_name': 'Report', 'closed_mapping_fields': {}, 'conditional_list_rules': [], 'constant_fields': {'schema_version': 1}, 'enum_fields': {}, 'fields': [{'default_kind': 'required', 'name': 'package'}, {'default_kind': 'required', 'name': 'current_version'}, {'default_kind': 'required', 'name': 'new_version'}, {'default_kind': 'required', 'name': 'coverage'}, {'default_kind': 'required', 'name': 'findings'}, {'default_kind': 'required', 'name': 'witnesses'}, {'default_kind': 'required', 'name': 'summary'}], 'ordered_mapping_list_fields': {}, 'sort_fields': [], 'sort_list_fields': {'findings': {'sort_fields': ['finding_id']}}}, {'allow_unknown': False, 'class_name': 'Environment', 'closed_mapping_fields': {}, 'conditional_list_rules': [], 'constant_fields': {}, 'enum_fields': {}, 'fields': [], 'ordered_mapping_list_fields': {}, 'sort_fields': [], 'sort_list_fields': {}}, {'allow_unknown': False, 'class_name': 'EnvironmentPair', 'closed_mapping_fields': {}, 'conditional_list_rules': [], 'constant_fields': {}, 'enum_fields': {}, 'fields': [], 'ordered_mapping_list_fields': {}, 'sort_fields': [], 'sort_list_fields': {}}, {'allow_unknown': False, 'class_name': 'UsageManifest', 'closed_mapping_fields': {}, 'conditional_list_rules': [], 'constant_fields': {}, 'enum_fields': {}, 'fields': [], 'ordered_mapping_list_fields': {}, 'sort_fields': [], 'sort_list_fields': {}}]
 
@@ -196,3 +197,33 @@ class UsageManifest:
 
 def canonical_json(value):
     return json.dumps(_plain(value), sort_keys=True, separators=(',', ':'))
+
+
+@dataclass(frozen=True)
+class ArtifactEnvelope:
+    """Immutable validated view of a closed schema-2 artifact."""
+
+    schema_version: int
+    artifact_kind: str
+    payload: dict
+    payload_sha256: str
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "ArtifactEnvelope":
+        from breakcheck.schema import validate_artifact
+
+        artifact = validate_artifact(value)
+        return cls(
+            schema_version=artifact["schema_version"],
+            artifact_kind=artifact["artifact_kind"],
+            payload=copy.deepcopy(artifact["payload"]),
+            payload_sha256=artifact["payload_sha256"],
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "artifact_kind": self.artifact_kind,
+            "payload": copy.deepcopy(self.payload),
+            "payload_sha256": self.payload_sha256,
+        }

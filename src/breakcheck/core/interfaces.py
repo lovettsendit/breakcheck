@@ -15,7 +15,13 @@ from .models import (
 )
 
 
-__all__ = ("UsageScanner", "EnvBuilder", "Executor", "EqualityRules")
+__all__ = (
+    "UsageScanner",
+    "EnvBuilder",
+    "Executor",
+    "EqualityRules",
+    "ArtifactVerifier",
+)
 
 
 class UsageScanner(Protocol):
@@ -46,3 +52,9 @@ class EqualityRules(Protocol):
     """Compare two normalized observations using ecosystem semantics."""
 
     def compare(self, old: Observation, new: Observation) -> Comparison: ...
+
+
+class ArtifactVerifier(Protocol):
+    """Verify a versioned report and its separately persisted evidence."""
+
+    def verify(self, report: dict, evidence: dict) -> str: ...
